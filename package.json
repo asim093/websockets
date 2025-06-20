@@ -1,0 +1,24 @@
+{
+  "scripts": {
+    "build": "node index.js",
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.10.0",
+    "nodemon": "^3.1.7"
+  },
+  "name": "entitymanagerapi",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "devDependencies": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
