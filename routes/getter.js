@@ -8,7 +8,7 @@ const router = express.Router();
 
 const getMessages = async (id, pinnedOnly = false) => {
   
-  let getRequest = { entityType: "Message", filter: { "object": id }};
+  let getRequest = { entityType: "Message", filter: { "object": new ObjectId(id) }};
   if (pinnedOnly) {
     getRequest = { entityType: "Message", filter: { "object": id, "isPin": true }}; 
   }
@@ -58,7 +58,7 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/Message/object/:id', async (req, res) => {
+router.get('/Message/object/:id', authenticateToken, async (req, res) => {
   try {
       const { id } = req.params;
       const data = await getMessages(id);

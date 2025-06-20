@@ -33,13 +33,14 @@ io.on("connection", (socket) => {
 
   // Handle sending messages
   socket.on("sendMessage", (messageData) => {
-    console.log("📩 Received sendMessage:", messageData);
-    const room = `${messageData.objectType}-${messageData.object}`;
-    
-    // Emit to all clients in the room (including the sender)
-    io.to(room).emit("newMessage", messageData); // 🔧 Fixed: emit "newMessage"
-    console.log(`📡 Message broadcasted to room ${room}`);
-  });
+  console.log("📩 Received sendMessage:", messageData);
+  const room = `${messageData.objectType}-${messageData.object}`;
+
+  socket.to(room).emit("newMessage", messageData); 
+
+  console.log(`📡 Message broadcasted to room ${room}`);
+});
+
 
   // Handle disconnection
   socket.on("disconnect", () => {
