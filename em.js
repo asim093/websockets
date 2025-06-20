@@ -2,12 +2,14 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
+require('dotenv').config();
+
 
 const emRoutes = require("./"); // Import the EM routes
 
 const app = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 // Setup Socket.IO
 const io = new Server(server, {

@@ -2,7 +2,8 @@ const getSchema = require("../utils/getSchema");
 const validatePayload = require("../utils/validatePayload");
 const hashSensitiveFields = require("../utils/hash");
 const { MongoClient, ObjectId } = require("mongodb");
-const processDocumentAndSendMail = require("../../sendar/processdocumentandsendmail");
+require('dotenv').config();
+
 const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
 
 async function updateEntity(entityType, id, data, action = "replace") {
@@ -98,13 +99,7 @@ async function updateEntity(entityType, id, data, action = "replace") {
       }
 
       console.log(entityType, id, Userid);
-      await processDocumentAndSendMail({
-        schemaName: entityType,
-        docId: id,
-        userId: Userid,
-        mailDesignName: "designer_access",
-        fieldToPopulate: "designers",
-      });
+     
 
     } else {
       // For replace or other actions

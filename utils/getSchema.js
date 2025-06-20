@@ -1,5 +1,7 @@
 const { MongoClient } = require('mongodb');
-const client = new MongoClient(process.env.MONGODB_URI);
+require('dotenv').config();
+
+const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
 
 async function getSchema(entityType) {
   try {

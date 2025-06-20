@@ -2,6 +2,8 @@
 const { MongoClient, ObjectId } = require("mongodb");
 const getSchema = require("../utils/getSchema"); // adjust path as needed 
 const safeParseJSON = require("../utils/parseJson");
+require('dotenv').config();
+
 
 async function globalSearch(request) {
   const {

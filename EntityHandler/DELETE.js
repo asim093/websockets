@@ -1,4 +1,5 @@
 const { MongoClient, ObjectId } = require('mongodb');
+require('dotenv').config();
 const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
 
 async function deleteEntity(entityType, id) {

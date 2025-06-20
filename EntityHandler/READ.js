@@ -1,5 +1,7 @@
 const getSchema = require("../utils/getSchema");
 const { MongoClient, ObjectId } = require("mongodb");
+require('dotenv').config();
+
 
 async function getAggregatedData(request) {
   const {

@@ -1,4 +1,6 @@
 const express = require("express");
+require('dotenv').config();
+
 const getterRoutes = require("./routes/getter");
 const posterRoutes = require("./routes/poster");
 const putterRoutes = require("./routes/putter");

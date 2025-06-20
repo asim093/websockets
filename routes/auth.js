@@ -1,6 +1,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const createEntity = require('../EntityHandler/CREATE');
+require('dotenv').config();
+
 
 const router = express.Router();
 
