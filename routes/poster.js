@@ -4,7 +4,7 @@ const createEntity = require('../EntityHandler/CREATE');
 const { ObjectId } = require('mongodb');
 
 const router = express.Router();
-router.post('/Message', authenticateToken, async (req, res) => {
+router.post('/Message', async (req, res) => {
   try {
     const payload = {
       ...req.body,
@@ -30,14 +30,5 @@ router.post('/Message', authenticateToken, async (req, res) => {
   }
 });
 
-router.post('/:type', authenticateToken, async (req, res) => {
-  const { type } = req.params; 
-  const result = await createEntity(type, req.body);
-  if (result.success) {
-    res.status(201).json(result);
-  } else {  
-    res.status(400).json(result);
-  }
-});
 
 module.exports = router;

@@ -1,8 +1,8 @@
 {
   "scripts": {
-    "build": "node em.js",
+    "build": "node index.js",
     "start": "node index.js",
-    "dev": "nodemon em.js",
+    "dev": "nodemon index.js",
     "deploy": "vercel --prod"
   },
   "dependencies": {

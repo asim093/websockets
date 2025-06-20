@@ -58,7 +58,7 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/Message/object/:id', authenticateToken, async (req, res) => {
+router.get('/Message/object/:id', async (req, res) => {
   try {
       const { id } = req.params;
       const data = await getMessages(id);
