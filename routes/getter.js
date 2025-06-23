@@ -6,46 +6,54 @@ const getJoiningMethod = require('../utils/joiningMethods/joiningMethods');
 
 const router = express.Router();
 
-const getMessages = async (id, pinnedOnly = false) => {
-  
-  let getRequest = { entityType: "Message", filter: { "object": new ObjectId(id) }};
+const getMessages = async (objectid, pinnedOnly = false, id) => {
+  let getRequest = {
+    entityType: "Message",
+    filter: id
+      ? { object: new ObjectId(objectid), _id: new ObjectId(id) }
+      : { object: new ObjectId(objectid) }
+  };
   if (pinnedOnly) {
-    getRequest = { entityType: "Message", filter: { "object": id, "isPin": true }}; 
+    getRequest = {
+      entityType: "Message",
+      filter: { object: objectid, isPin: true },
+    };
   }
 
   console.log(getRequest);
   getRequest.$lookup = {
     $lookup: {
-          from: 'User', // Collection to join with
-          localField: 'sender', // Field in Messages
-          foreignField: '_id', // Field in Users (should be ObjectId type)
-          as: 'userDetails' // Output array field
-      }
+      from: "User", // Collection to join with
+      localField: "sender", // Field in Messages
+      foreignField: "_id", // Field in Users (should be ObjectId type)
+      as: "userDetails", // Output array field
+    },
   };
 
   getRequest.$unwind = {
-      $unwind: '$userDetails' // Convert array to object (optional)
+    $unwind: "$userDetails", // Convert array to object (optional)
   };
 
   getRequest.$project = {
-      $project: {
-          _id: 1,
-          objectType: 1,
-          message: 1, // Make sure this exists in Messages
-          sender: 1,
-          attachments: 1,
-          visibility: 1,
-          createdAt: 1,
-          top: 1,
-          left: 1, 
-          isPin: 1,
-          profileImage: '$userDetails.profileImage', // Get user profile image from lookup
-          name: '$userDetails.name' // Get user name from lookup
-        }
+    $project: {
+      _id: 1,
+      objectType: 1,
+      message: 1,
+      sender: 1,
+      attachments: 1,
+      visibility: 1,
+      createdAt: 1,
+      top: 1,
+      left: 1,
+      isPin: 1,
+      profileImage: "$userDetails.profileImage", // Get user profile image from lookup
+      name: "$userDetails.name", // Get user name from lookup
+    },
   };
   const data = await getAggregatedData(getRequest);
   return data;
-}
+};
+
 
 router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   try {
@@ -58,16 +66,28 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/Message/object/:id', authenticateToken, async (req, res) => {
-  try {
-      const { id } = req.params;
-      const data = await getMessages(id);
+router.get(
+  "/Message/object/:objectid/:id?",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { objectid, id } = req.params;
+
+      let data;
+
+      if (id) {
+        data = await getMessages(objectid, false, id);
+      } else {
+        data = await getMessages(objectid);
+      }
+
       res.json(data);
-  } catch (error) {
-      console.log("/Message/object/:id encountered an error: ", error);
+    } catch (error) {
+      console.error("/Message/object/:objectid/:id error:", error);
       res.status(500).json({ error: error.message });
+    }
   }
-});
+);
 
 router.get("/Design/:id?", async (req, res) => {
   console.log("Design request received");
