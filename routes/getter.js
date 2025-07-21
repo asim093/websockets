@@ -68,7 +68,7 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
   return data;
 };
 
-router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
+router.get('/PinnedMessage/object/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const data = await getMessages(id, true);
@@ -79,7 +79,7 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res) => {
+router.get("/Message/object/:objectid/:id?", async (req, res) => {
   try {
     const { objectid, id } = req.params;
     const userRole = await getUserRole(req.user.userId);
