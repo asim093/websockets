@@ -2,7 +2,6 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-const jwt = require('jsonwebtoken'); // Add this
 
 const emRoutes = require("./em");
 const { getUserRole } = require("./utils/getuserRole");
@@ -19,46 +18,20 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
 });
 
-// Socket.IO authentication middleware
-io.use((socket, next) => {
-  try {
-    // Get token from auth object or query
-    const token = socket.handshake.auth.token || socket.handshake.query.token;
-    
-    if (!token) {
-      return next(new Error('Authentication token required'));
-    }
-
-    // Verify JWT token
-    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
-    
-    // Attach user info to socket
-    socket.userId = decoded.userId;
-    socket.token = token;
-    
-    console.log('✅ Socket authenticated for user:', decoded.userId);
-    next();
-  } catch (err) {
-    console.error('❌ Socket authentication error:', err);
-    next(new Error('Invalid authentication token'));
-  }
-});
 
 io.on("connection", (socket) => {
-  console.log("🟢 Socket connected:", socket.id, "User:", socket.userId);
+  console.log("🟢 Socket connected:", socket.id);
 
   socket.on("join", async ({ objectType, objectId, userId, token }) => {
     try {
-      // Use the authenticated userId from middleware instead of the one from client
-      const authenticatedUserId = socket.userId;
-      
-      console.log(`🔵 Socket ${socket.id} joining room for ${objectType} with ID ${objectId}, userId: ${authenticatedUserId}`);
+      console.log(`🔵 Socket ${socket.id} joining room for ${objectType} with ID ${objectId}, userId: ${userId}`);
 
       const room = `${objectType}-${objectId}`;
       socket.join(room);
 
-      const userRole = await getUserRole(authenticatedUserId);
+      const userRole = await getUserRole(userId);
       socket.userRole = userRole;
+      socket.userId = userId;
       socket.objectType = objectType;
       socket.objectId = objectId;
 
@@ -79,13 +52,6 @@ io.on("connection", (socket) => {
 
   socket.on('sendMessage', (data) => {
     try {
-      // Verify the sender matches authenticated user
-      if (data.sender !== socket.userId) {
-        console.error('❌ Unauthorized message send attempt');
-        socket.emit('error', { message: 'Unauthorized' });
-        return;
-      }
-
       const room = `${data.objectType}-${data.object}`;
       console.log(`📤 Broadcasting message to room: ${room}`);
       
@@ -98,7 +64,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log("🔴 Socket disconnected:", socket.id, "User:", socket.userId);
+    console.log("🔴 Socket disconnected:", socket.id);
   });
 });
 
