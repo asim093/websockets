@@ -1,34 +1,125 @@
-const express = require('express');
-const authenticateToken = require('../utils/auth/token');
-const createEntity = require('../EntityHandler/CREATE');
-const { ObjectId } = require('mongodb');
+const express = require("express");
+const authenticateToken = require("../utils/auth/token");
+const createEntity = require("../EntityHandler/CREATE");
+const { ObjectId, MongoClient } = require("mongodb");
+const { getUserRole } = require("../utils/getuserRole");
 
 const router = express.Router();
-router.post('/Message', async (req, res) => {
+
+const calculateVisibleToRoles = (senderRole, targetRole) => {
+  let visibleToRoles = [];
+
+  if (senderRole && !visibleToRoles.includes(senderRole)) {
+    visibleToRoles.push(senderRole);
+  }
+
+  if (targetRole === "All") {
+    visibleToRoles = ["Admin", "Client", "Designer"];
+  } else if (targetRole && !visibleToRoles.includes(targetRole)) {
+    visibleToRoles.push(targetRole);
+  }
+
+  return visibleToRoles;
+};
+
+router.post("/Message", async (req, res) => {
   try {
+    console.log("📨 Incoming message request:", req.body);
+
+    const senderRole = await getUserRole(req.body.sender);
+    if (!senderRole) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid sender" });
+    }
+
+    console.log("👤 Sender role:", senderRole);
+
+    const visibleToRoles = calculateVisibleToRoles(
+      senderRole,
+      req.body.targetRole
+    );
+    console.log("👥 Visible to roles:", visibleToRoles);
+
     const payload = {
       ...req.body,
-      object: new ObjectId(req.body.object), // Ensure object is ObjectId
-      sender: new ObjectId(req.body.sender), // Ensure sender is ObjectId
-      createdAt: new Date()
+      object: new ObjectId(req.body.object),
+      sender: new ObjectId(req.body.sender),
+      senderRole: senderRole,
+      visibleToRoles: visibleToRoles,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
     const result = await createEntity("Message", payload);
+    console.log("be", result);
     if (result.success) {
-      // ✅ Emit socket event
+      console.log("✅ Message saved to DB:", result.data?._id);
 
-      console.log("Emitting newMessage event to:", payload,req.body.object);
-      
-      req.io.to(req.body.object).emit("newMessage", result.message);
+      // Prepare room name
+      const roomName = `${req.body.objectType}-${req.body.object}`;
+      console.log("🏠 Emitting to room:", roomName);
+
+      // Get all sockets in the room
+      const socketsInRoom = await req.io.in(roomName).fetchSockets();
+      console.log(
+        `📡 Found ${socketsInRoom.length} sockets in room ${roomName}`
+      );
+
+      if (socketsInRoom.length === 0) {
+        console.log(
+          "⚠️ No sockets found in room. Check room name and socket connections."
+        );
+      }
+
+      const messageToEmit = {
+        ...payload,
+        _id: result.id,
+        visibleToRoles: visibleToRoles,
+        tempId: req.body.tempId,
+      };
+
+      console.log(
+        "📤 Message to emit:",
+        JSON.stringify(messageToEmit, null, 2)
+      );
+
+      // Emit to all eligible sockets
+      let emittedCount = 0;
+      socketsInRoom.forEach((socket) => {
+        console.log(`🔍 Checking socket ${socket.id}:`);
+        console.log(`   - User ID: ${socket.userId}`);
+        console.log(`   - User Role: ${socket.userRole}`);
+        console.log(`   - Object Type: ${socket.objectType}`);
+        console.log(`   - Object ID: ${socket.objectId}`);
+
+        if (socket.userRole && visibleToRoles.includes(socket.userRole)) {
+          console.log(
+            `✅ Emitting to socket ${socket.id} (${socket.userRole})`
+          );
+          socket.emit("newMessage", messageToEmit);
+          emittedCount++;
+        } else {
+          console.log(
+            `❌ Socket ${socket.id} role ${socket.userRole} not in visibleToRoles:`,
+            visibleToRoles
+          );
+        }
+      });
+
+      console.log(
+        `📊 Emitted message to ${emittedCount} out of ${socketsInRoom.length} sockets`
+      );
+
       return res.status(201).json(result);
     } else {
+      console.error("❌ Failed to save message:", result);
       return res.status(400).json(result);
     }
   } catch (error) {
-    console.error("Error creating message:", error);
+    console.error("💥 Error creating message:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 });
-
 
 module.exports = router;

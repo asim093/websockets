@@ -3,22 +3,36 @@ const authenticateToken = require('../utils/auth/token');
 const { getAggregatedData } = require('../EntityHandler/READ');
 const { MongoClient, ObjectId } = require('mongodb');
 const getJoiningMethod = require('../utils/joiningMethods/joiningMethods');
+const { getUserRole } = require('../utils/getuserRole');
 
 const router = express.Router();
 
-const getMessages = async (objectid, pinnedOnly = false, id) => {
+const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
   let getRequest = {
     entityType: "Message",
     filter: id
-      ? { object: new ObjectId(objectid), _id: new ObjectId(id) }
-      : { object: new ObjectId(objectid) }
+      ? {
+        object: new ObjectId(objectid),
+        _id: new ObjectId(id),
+        visibleToRoles: { $in: [userRole] }
+      }
+      : {
+        object: new ObjectId(objectid),
+        visibleToRoles: { $in: [userRole] }
+      }
   };
+
   if (pinnedOnly) {
     getRequest = {
       entityType: "Message",
-      filter: { object: objectid, isPin: true },
+      filter: {
+        object: objectid,
+        isPin: true,
+        visibleToRoles: { $in: [userRole] }
+      },
     };
   }
+
 
   console.log(getRequest);
   getRequest.$lookup = {
@@ -54,40 +68,35 @@ const getMessages = async (objectid, pinnedOnly = false, id) => {
   return data;
 };
 
-
 router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   try {
-      const { id } = req.params;
-      const data = await getMessages(id, true);
-      res.json(data);
+    const { id } = req.params;
+    const data = await getMessages(id, true);
+    res.json(data);
   } catch (error) {
-      console.log("/PinnedMessage/object/:id encountered an error: ", error);
-      res.status(500).json({ error: error.message });
+    console.log("/PinnedMessage/object/:id encountered an error: ", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-router.get(
-  "/Message/object/:objectid/:id?",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { objectid, id } = req.params;
+router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res) => {
+  try {
+    const { objectid, id } = req.params;
+    const userRole = await getUserRole(req.user.userId);
 
-      let data;
-
-      if (id) {
-        data = await getMessages(objectid, false, id);
-      } else {
-        data = await getMessages(objectid);
-      }
-
-      res.json(data);
-    } catch (error) {
-      console.error("/Message/object/:objectid/:id error:", error);
-      res.status(500).json({ error: error.message });
+    let data;
+    if (id) {
+      data = await getMessages(objectid, false, id, userRole);
+    } else {
+      data = await getMessages(objectid, false, null, userRole);
     }
+
+    res.json(data);
+  } catch (error) {
+    console.error("/Message/object/:objectid/:id error:", error);
+    res.status(500).json({ error: error.message });
   }
-);
+});
 
 router.get("/Design/:id?", async (req, res) => {
   console.log("Design request received");
@@ -97,7 +106,7 @@ router.get("/Design/:id?", async (req, res) => {
     let getRequest = {
       entityType: "Design"
     };
-    if(createdbyid) getRequest.filter = { createdBy: new ObjectId(createdbyid) };
+    if (createdbyid) getRequest.filter = { createdBy: new ObjectId(createdbyid) };
     const joiningMethod = getJoiningMethod("/Design/requestId/:id");
 
     if (joiningMethod?.$lookup) {
@@ -122,13 +131,13 @@ router.get("/Design/:id?", async (req, res) => {
 router.get("/Design/requestId/:id", async (req, res) => {
   const requestId = req.params.id;
   const filer = req.query.filter ? JSON.parse(req.query.filter) : {};
-  const type = req.query.type || "latest"; 
+  const type = req.query.type || "latest";
   try {
-    let getRequest = { 
-      entityType: "Design", 
-      filter: { requestId: requestId,...filer },
+    let getRequest = {
+      entityType: "Design",
+      filter: { requestId: requestId, ...filer },
     };
-    
+
     const joiningMethod = getJoiningMethod(type);
 
     if (joiningMethod?.$lookup) {
@@ -153,38 +162,39 @@ router.get("/Design/requestId/:id", async (req, res) => {
 
 router.get('/:type/:field/:value', authenticateToken, async (req, res) => {
   try {
-      const { type, field, value } = req.params;
-      const getRequest = { entityType: type, filter: { [field]: value }};
-      const data = await getAggregatedData(getRequest);
-      res.json(data);
+    const { type, field, value } = req.params;
+    const getRequest = { entityType: type, filter: { [field]: value } };
+    const data = await getAggregatedData(getRequest);
+    res.json(data);
   } catch (error) {
-      console.log("/:type/:field/:value encountered an error: ", error);
-      res.status(500).json({ error: error.message });
+    console.log("/:type/:field/:value encountered an error: ", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 
 router.get('/:type/:id', authenticateToken, async (req, res) => {
-  const { type, id } = req.params; 
-  const getRequest = { entityType: type, filter: { _id: id }};
+  const { type, id } = req.params;
+  const getRequest = { entityType: type, filter: { _id: id } };
   const data = await getAggregatedData(getRequest);
   res.json(data);
 });
 
 router.get('/:type', authenticateToken, async (req, res) => {
   try {
+    console.log("working")
     const { type } = req.params;
-    const getRequest = { entityType: type};
+    const getRequest = { entityType: type };
     if (req.query.filter) {
       const filter = JSON.parse(req.query.filter);
       getRequest.filter = filter;
     }
     const data = await getAggregatedData(getRequest);
-    
+
     res.json(data);
   } catch (error) {
-      console.log("/:type encountered an error: ", error);
-      res.status(500).json({ error: error.message });
+    console.log("/:type encountered an error: ", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
