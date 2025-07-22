@@ -1,14 +1,20 @@
+require('dotenv').config();
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 
+const { getUserRole } = require("./utils/getuserRole.js");
 const emRoutes = require("./em");
-const { getUserRole } = require("./utils/getuserRole");
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3005;
+
+console.log('🔍 Environment check:');
+console.log('MONGODB_CONNECTION_STRING:', process.env.MONGODB_CONNECTION_STRING ? 'EXISTS' : 'MISSING');
+console.log('DB_NAME:', process.env.DB_NAME ? 'EXISTS' : 'MISSING');
 
 const io = new Server(server, {
   cors: {
@@ -18,53 +24,90 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
 });
 
-
 io.on("connection", (socket) => {
   console.log("🟢 Socket connected:", socket.id);
 
-  socket.on("join", async ({ objectType, objectId, userId, token }) => {
+  socket.on("join", async ({ objectType, objectId, userId }) => {
     try {
       console.log(`🔵 Socket ${socket.id} joining room for ${objectType} with ID ${objectId}, userId: ${userId}`);
-
+      
       const room = `${objectType}-${objectId}`;
       socket.join(room);
-
-      const userRole = await getUserRole(userId);
+      
+      // ✅ Get user role with error handling
+      let userRole;
+      try {
+        userRole = await getUserRole(userId);
+        if (!userRole) {
+          console.warn(`⚠️ No role found for user ${userId}, defaulting to Client`);
+          userRole = 'Client';
+        }
+      } catch (roleError) {
+        console.error('❌ Error getting user role:', roleError.message);
+        userRole = 'Client'; 
+      }
+      
       socket.userRole = userRole;
       socket.userId = userId;
       socket.objectType = objectType;
       socket.objectId = objectId;
-
+      
       console.log(`✅ Socket ${socket.id} joined room ${room} as ${userRole}`);
-
-      // Confirm join to client
+      
       socket.emit('joined', {
         room,
         userRole,
-        message: `Successfully joined room ${room}`
+        message: `Successfully joined room ${room} as ${userRole}`
       });
-
     } catch (error) {
       console.error('❌ Error in socket join:', error);
       socket.emit('error', { message: 'Failed to join room' });
     }
   });
 
-  socket.on('sendMessage', (data) => {
-    try {
-      const room = `${data.objectType}-${data.object}`;
-      console.log(`📤 Broadcasting message to room: ${room}`);
+  socket.on("sendMessage", (messageData) => {
+    console.log("📩 Received sendMessage:", messageData);
+    
+    if (!messageData || !messageData.objectType || !messageData.object) {
+      console.error("❌ Invalid message data:", messageData);
+      return;
+    }
+    
+    const room = `${messageData.objectType}-${messageData.object}`;
+    const targetRole = messageData.targetRole;
+    
+    console.log(`🎯 Target Role: ${targetRole}`);
+    
+    if (targetRole === 'All') {
+      socket.to(room).emit("newMessage", messageData);
+      console.log(`📡 Message sent to ALL users in room ${room}`);
+    } else {
+      const roomSockets = io.sockets.adapter.rooms.get(room);
       
-      // Broadcast to all sockets in the room
-      io.to(room).emit('newMessage', data);
-    } catch (error) {
-      console.error('❌ Error sending message:', error);
-      socket.emit('error', { message: 'Failed to send message' });
+      if (roomSockets) {
+        roomSockets.forEach(socketId => {
+          const targetSocket = io.sockets.sockets.get(socketId);
+          
+          if (targetSocket && 
+              targetSocket.id !== socket.id && 
+              targetSocket.userRole === targetRole) {
+            
+            targetSocket.emit("newMessage", messageData);
+            console.log(`📡 Message sent to ${targetRole}: ${targetSocket.id}`);
+          }
+        });
+      }
+      
+      console.log(`🎯 Message targeted to ${targetRole} users only`);
     }
   });
 
   socket.on("disconnect", () => {
     console.log("🔴 Socket disconnected:", socket.id);
+  });
+
+  socket.on("error", (error) => {
+    console.error("❌ Socket error:", error);
   });
 });
 
