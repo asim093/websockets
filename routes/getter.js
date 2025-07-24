@@ -7,6 +7,7 @@ const { getUserRole } = require('../utils/getuserRole');
 
 const router = express.Router();
 
+// Updated getMessages function with targetRole and visibleToRoles support
 const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
   let getRequest = {
     entityType: "Message",
@@ -33,19 +34,18 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
     };
   }
 
-
   console.log(getRequest);
   getRequest.$lookup = {
     $lookup: {
-      from: "User", // Collection to join with
-      localField: "sender", // Field in Messages
-      foreignField: "_id", // Field in Users (should be ObjectId type)
-      as: "userDetails", // Output array field
+      from: "User",
+      localField: "sender",
+      foreignField: "_id",
+      as: "userDetails",
     },
   };
 
   getRequest.$unwind = {
-    $unwind: "$userDetails", // Convert array to object (optional)
+    $unwind: "$userDetails",
   };
 
   getRequest.$project = {
@@ -56,14 +56,19 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
       sender: 1,
       attachments: 1,
       visibility: 1,
+      targetRole: 1,        // Include targetRole field
+      visibleToRoles: 1,    // Include visibleToRoles field
+      senderRole: 1,        // Include senderRole field
       createdAt: 1,
+      updatedAt: 1,         // Include updatedAt field
       top: 1,
       left: 1,
       isPin: 1,
-      profileImage: "$userDetails.profileImage", // Get user profile image from lookup
-      name: "$userDetails.name", // Get user name from lookup
+      profileImage: "$userDetails.profileImage",
+      name: "$userDetails.name",
     },
   };
+  
   const data = await getAggregatedData(getRequest);
   return data;
 };
@@ -71,7 +76,8 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
 router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const data = await getMessages(id, true);
+    const userRole = await getUserRole(req.user.userId);
+    const data = await getMessages(id, true, null, userRole);
     res.json(data);
   } catch (error) {
     console.log("/PinnedMessage/object/:id encountered an error: ", error);
@@ -79,10 +85,13 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Message getter with proper role-based filtering
 router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res) => {
   try {
     const { objectid, id } = req.params;
     const userRole = await getUserRole(req.user.userId);
+
+    console.log(`📖 Getting messages for object: ${objectid}, user role: ${userRole}`);
 
     let data;
     if (id) {
@@ -91,6 +100,7 @@ router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res)
       data = await getMessages(objectid, false, null, userRole);
     }
 
+    console.log(`✅ Found ${data.data?.length || 0} messages visible to ${userRole}`);
     res.json(data);
   } catch (error) {
     console.error("/Message/object/:objectid/:id error:", error);
@@ -113,10 +123,10 @@ router.get("/Design/:id?", async (req, res) => {
       getRequest.$lookup = joiningMethod.$lookup;
     }
     if (joiningMethod?.$unwind) {
-      getRequest.$lookup = joiningMethod.$lookup;
+      getRequest.$unwind = joiningMethod.$unwind;
     }
     if (joiningMethod?.$project) {
-      getRequest.$lookup = joiningMethod.$lookup;
+      getRequest.$project = joiningMethod.$project;
     }
 
     const data = await getAggregatedData(getRequest);
@@ -144,10 +154,10 @@ router.get("/Design/requestId/:id", async (req, res) => {
       getRequest.$lookup = joiningMethod.$lookup;
     }
     if (joiningMethod?.$unwind) {
-      getRequest.$lookup = joiningMethod.$lookup;
+      getRequest.$unwind = joiningMethod.$unwind;
     }
     if (joiningMethod?.$project) {
-      getRequest.$lookup = joiningMethod.$lookup;
+      getRequest.$project = joiningMethod.$project;
     }
 
     const data = await getAggregatedData(getRequest);
@@ -158,7 +168,6 @@ router.get("/Design/requestId/:id", async (req, res) => {
     res.status(500).json({ success: false, error: "Internal Server Error" });
   }
 });
-
 
 router.get('/:type/:field/:value', authenticateToken, async (req, res) => {
   try {
@@ -171,7 +180,6 @@ router.get('/:type/:field/:value', authenticateToken, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 router.get('/:type/:id', authenticateToken, async (req, res) => {
   const { type, id } = req.params;
@@ -202,9 +210,5 @@ router.get('/', authenticateToken, async (req, res) => {
   const data = await getAggregatedData(req.body);
   res.json(data);
 });
-
-
-
-
 
 module.exports = router;

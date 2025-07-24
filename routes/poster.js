@@ -15,6 +15,9 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
 
   if (targetRole === "All") {
     visibleToRoles = ["Admin", "Client", "Designer"];
+  } else if (targetRole === "Internal") {
+    // Internal messages are only visible to the sender
+    visibleToRoles = [senderRole];
   } else if (targetRole && !visibleToRoles.includes(targetRole)) {
     visibleToRoles.push(targetRole);
   }
@@ -22,6 +25,7 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
   return visibleToRoles;
 };
 
+// Create new message
 router.post("/Message", async (req, res) => {
   try {
     console.log("📨 Incoming message request:", req.body);
@@ -52,7 +56,8 @@ router.post("/Message", async (req, res) => {
     };
 
     const result = await createEntity("Message", payload);
-    console.log("be", result);
+    console.log("Database result:", result);
+
     if (result.success) {
       console.log("✅ Message saved to DB:", result.data?._id);
 
@@ -121,5 +126,6 @@ router.post("/Message", async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 });
+
 
 module.exports = router;

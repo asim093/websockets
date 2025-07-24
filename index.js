@@ -34,7 +34,6 @@ io.on("connection", (socket) => {
       const room = `${objectType}-${objectId}`;
       socket.join(room);
       
-      // ✅ Get user role with error handling
       let userRole;
       try {
         userRole = await getUserRole(userId);
@@ -81,10 +80,13 @@ io.on("connection", (socket) => {
     if (targetRole === 'All') {
       socket.to(room).emit("newMessage", messageData);
       console.log(`📡 Message sent to ALL users in room ${room}`);
+    } else if (targetRole === 'Internal') {
+      console.log(`🔒 Internal message - not broadcasting to other users`);
     } else {
       const roomSockets = io.sockets.adapter.rooms.get(room);
       
       if (roomSockets) {
+        let sentCount = 0;
         roomSockets.forEach(socketId => {
           const targetSocket = io.sockets.sockets.get(socketId);
           
@@ -94,12 +96,28 @@ io.on("connection", (socket) => {
             
             targetSocket.emit("newMessage", messageData);
             console.log(`📡 Message sent to ${targetRole}: ${targetSocket.id}`);
+            sentCount++;
           }
         });
+        
+        console.log(`🎯 Message targeted to ${targetRole} users - sent to ${sentCount} sockets`);
+      } else {
+        console.log(`⚠️ No sockets found in room ${room}`);
       }
-      
-      console.log(`🎯 Message targeted to ${targetRole} users only`);
     }
+  });
+
+  socket.on("messageVisibilityChanged", (data) => {
+    console.log("🔄 Received visibility change:", data);
+    
+    if (!data || !data.objectType || !data.object) {
+      console.error("❌ Invalid visibility change data:", data);
+      return;
+    }
+    
+    const room = `${data.objectType}-${data.object}`;
+    socket.to(room).emit("messageVisibilityChanged", data);
+    console.log(`🔄 Visibility change broadcasted to room ${room}`);
   });
 
   socket.on("disconnect", () => {
