@@ -5,7 +5,6 @@ const { ObjectId, MongoClient } = require('mongodb');
 
 const router = express.Router();
 
-// Add debugging middleware
 router.use((req, res, next) => {
   console.log(`🔍 PUTTER.JS - ${req.method} ${req.path}`);
   next();
@@ -58,7 +57,6 @@ router.put("/Message/:id/visibility", async (req, res) => {
       const updatedMessage = await collection.findOne({ _id: new ObjectId(messageId) });
       await client.close();
 
-      // Emit visibility change if socket.io is available
       if (req.io) {
         const roomName = `${currentMessage.objectType}-${currentMessage.object}`;
         const visibilityChangeData = {
@@ -94,7 +92,53 @@ router.put("/Message/:id/visibility", async (req, res) => {
   }
 });
 
-// This route handles /Message/:id (regular message updates)
+router.put("/Message/:id/read" , async(req,res) => {
+
+  try {
+    const messageId = req.params.id;
+    const { userId } = req.body;
+
+    if(!ObjectId.isValid(messageId)){
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID"
+      });
+    }
+    const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
+    await client.connect();
+    const db = client.db(process.env.DB_NAME);
+    const collection = db.collection("Message");
+    
+    const updateResult = await collection.updateOne(
+      { _id: new ObjectId(messageId) },
+      { 
+        $addToSet: { 
+          readBy: userId 
+        }
+      }
+    );
+    
+    await client.close();
+    
+    if (updateResult.modifiedCount === 1) {
+      console.log("✅ Message updated successfully");
+      return res.status(200).json({ 
+        success: true, 
+        message: "Message updated successfully"
+      });
+    } else {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Message not found or no changes made" 
+      });
+    }
+
+
+  } catch (error) {
+    console.error("💥 Error updating message read status:", error);
+  }
+})
+
 router.put("/Message/:id", async (req, res) => {
   console.log("🎯 REGULAR MESSAGE UPDATE ROUTE HIT:", req.params.id);
   

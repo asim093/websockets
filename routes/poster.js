@@ -51,6 +51,7 @@ router.post("/Message", async (req, res) => {
       sender: new ObjectId(req.body.sender),
       senderRole: senderRole,
       visibleToRoles: visibleToRoles,
+      readBy: [],
       createdAt: new Date(),
       updatedAt: new Date(),
     };
