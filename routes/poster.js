@@ -9,20 +9,32 @@ const router = express.Router();
 const calculateVisibleToRoles = (senderRole, targetRole) => {
   let visibleToRoles = [];
 
-  if (senderRole && !visibleToRoles.includes(senderRole)) {
+  // Add sender role
+  if (senderRole) {
     visibleToRoles.push(senderRole);
   }
 
-  if (targetRole === "All") {
-    visibleToRoles = ["Admin", "Client", "Designer"];
-  } else if (targetRole === "Internal") {
-    // Internal messages are only visible to the sender
-    visibleToRoles = [senderRole];
-  } else if (targetRole && !visibleToRoles.includes(targetRole)) {
-    visibleToRoles.push(targetRole);
+  // Convert to array for consistent processing
+  const targetRoles = Array.isArray(targetRole) ? targetRole : [targetRole];
+  
+  // Check for special cases first
+  if (targetRoles.includes("All")) {
+    return ["Admin", "Client", "Designer"];
+  }
+  
+  if (targetRoles.includes("Internal")) {
+    return [senderRole];
   }
 
-  return visibleToRoles;
+  // Add regular target roles
+  targetRoles.forEach((role) => {
+    if (role && !visibleToRoles.includes(role)) {
+      visibleToRoles.push(role);
+    }
+  });
+
+  // Remove duplicates and return
+  return [...new Set(visibleToRoles)];
 };
 
 // Create new message
