@@ -92,18 +92,25 @@ router.put("/Message/:id/visibility", async (req, res) => {
   }
 });
 
-router.put("/Message/:id/read" , async(req,res) => {
-
+router.put("/Message/:id/read", async (req, res) => {
   try {
     const messageId = req.params.id;
     const { userId } = req.body;
 
-    if(!ObjectId.isValid(messageId)){
+    if (!ObjectId.isValid(messageId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid message ID"
       });
     }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required"
+      });
+    }
+
     const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
     await client.connect();
     const db = client.db(process.env.DB_NAME);
@@ -113,31 +120,26 @@ router.put("/Message/:id/read" , async(req,res) => {
       { _id: new ObjectId(messageId) },
       { 
         $addToSet: { 
-          readBy: userId 
+          readBy: userId
         }
       }
     );
     
     await client.close();
     
-    if (updateResult.modifiedCount === 1) {
-      console.log("✅ Message updated successfully");
-      return res.status(200).json({ 
-        success: true, 
-        message: "Message updated successfully"
-      });
-    } else {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Message not found or no changes made" 
-      });
-    }
-
+    return res.status(200).json({ 
+      success: true, 
+      message: updateResult.modifiedCount === 1 ? "Message marked as read" : "No message updated (maybe already read or not found)"
+    });
 
   } catch (error) {
     console.error("💥 Error updating message read status:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
   }
-})
+});
 
 router.put("/Message/:id", async (req, res) => {
   console.log("🎯 REGULAR MESSAGE UPDATE ROUTE HIT:", req.params.id);

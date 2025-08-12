@@ -33,7 +33,6 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
     }
   });
 
-  // Remove duplicates and return
   return [...new Set(visibleToRoles)];
 };
 

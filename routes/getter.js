@@ -7,34 +7,33 @@ const { getUserRole } = require('../utils/getuserRole');
 
 const router = express.Router();
 
-// Updated getMessages function with targetRole and visibleToRoles support
-const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
-  let getRequest = {
-    entityType: "Message",
-    filter: id
-      ? {
-        object: new ObjectId(objectid),
-        _id: new ObjectId(id),
-        visibleToRoles: { $in: [userRole] }
-      }
-      : {
-        object: new ObjectId(objectid),
-        visibleToRoles: { $in: [userRole] }
-      }
+const getMessages = async (objectid, pinnedOnly = false, id, userRole, userCreatedAt = null) => {
+  let filter = {
+    object: new ObjectId(objectid),
+    visibleToRoles: { $in: [userRole] }
   };
 
-  if (pinnedOnly) {
-    getRequest = {
-      entityType: "Message",
-      filter: {
-        object: objectid,
-        isPin: true,
-        visibleToRoles: { $in: [userRole] }
-      },
-    };
+  if (userCreatedAt) {
+    filter.createdAt = { $gt: new Date(userCreatedAt) };
+    console.log(`📅 Filtering messages created after user creation: ${userCreatedAt}`);
   }
 
-  console.log(getRequest);
+  if (id) {
+    filter._id = new ObjectId(id);
+  }
+
+  // Add pinned filter if needed
+  if (pinnedOnly) {
+    filter.isPin = true;
+  }
+
+  let getRequest = {
+    entityType: "Message",
+    filter: filter
+  };
+
+  console.log('🔍 Message filter:', JSON.stringify(filter, null, 2));
+
   getRequest.$lookup = {
     $lookup: {
       from: "User",
@@ -56,11 +55,11 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole) => {
       sender: 1,
       attachments: 1,
       visibility: 1,
-      targetRole: 1,        // Include targetRole field
-      visibleToRoles: 1,    // Include visibleToRoles field
-      senderRole: 1,        // Include senderRole field
+      targetRole: 1,       
+      visibleToRoles: 1,    
+      senderRole: 1,       
       createdAt: 1,
-      updatedAt: 1,         // Include updatedAt field
+      updatedAt: 1,         
       top: 1,
       left: 1,
       isPin: 1,
@@ -77,7 +76,13 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userRole = await getUserRole(req.user.userId);
-    const data = await getMessages(id, true, null, userRole);
+    
+    // Pass user creation date to filter messages
+    const userCreatedAt = req.user?.createdAt || null;
+    console.log("userCreatedAt" ,userCreatedAt)
+    const data = await getMessages(id, true, null, userRole, userCreatedAt);
+    
+    console.log(`✅ Found ${data.data?.length || 0} pinned messages for user created at: ${userCreatedAt}`);
     res.json(data);
   } catch (error) {
     console.log("/PinnedMessage/object/:id encountered an error: ", error);
@@ -85,22 +90,21 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Message getter with proper role-based filtering
 router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res) => {
   try {
     const { objectid, id } = req.params;
     const userRole = await getUserRole(req.user.userId);
 
-    console.log(`📖 Getting messages for object: ${objectid}, user role: ${userRole}`);
-
+    const userCreatedAt = req.user?.createdAt || null;
+    console.log("userCreatedAt" ,userCreatedAt)
     let data;
     if (id) {
-      data = await getMessages(objectid, false, id, userRole);
+      data = await getMessages(objectid, false, id, userRole, userCreatedAt);
     } else {
-      data = await getMessages(objectid, false, null, userRole);
+      data = await getMessages(objectid, false, null, userRole, userCreatedAt);
     }
 
-    console.log(`✅ Found ${data.data?.length || 0} messages visible to ${userRole}`);
+    console.log(`✅ Found ${data.data?.length || 0} messages visible to ${userRole} (created after user: ${userCreatedAt})`);
     res.json(data);
   } catch (error) {
     console.error("/Message/object/:objectid/:id error:", error);
