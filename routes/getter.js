@@ -12,6 +12,7 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole, userCreat
     object: new ObjectId(objectid),
     visibleToRoles: { $in: [userRole] }
   };
+  console.log("get messages console" ,objectid , id, userRole, userCreatedAt)
 
   if (userCreatedAt) {
     filter.createdAt = { $gt: new Date(userCreatedAt) };
@@ -22,7 +23,6 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole, userCreat
     filter._id = new ObjectId(id);
   }
 
-  // Add pinned filter if needed
   if (pinnedOnly) {
     filter.isPin = true;
   }
@@ -32,7 +32,6 @@ const getMessages = async (objectid, pinnedOnly = false, id, userRole, userCreat
     filter: filter
   };
 
-  console.log('🔍 Message filter:', JSON.stringify(filter, null, 2));
 
   getRequest.$lookup = {
     $lookup: {
@@ -77,7 +76,6 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const userRole = await getUserRole(req.user.userId);
     
-    // Pass user creation date to filter messages
     const userCreatedAt = req.user?.createdAt || null;
     console.log("userCreatedAt" ,userCreatedAt)
     const data = await getMessages(id, true, null, userRole, userCreatedAt);
@@ -93,6 +91,7 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
 router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res) => {
   try {
     const { objectid, id } = req.params;
+    console.log("localhost" , objectid , id )
     const userRole = await getUserRole(req.user.userId);
 
     const userCreatedAt = req.user?.createdAt || null;

@@ -14,10 +14,8 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
     visibleToRoles.push(senderRole);
   }
 
-  // Convert to array for consistent processing
   const targetRoles = Array.isArray(targetRole) ? targetRole : [targetRole];
   
-  // Check for special cases first
   if (targetRoles.includes("All")) {
     return ["Admin", "Client", "Designer"];
   }
@@ -26,7 +24,6 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
     return [senderRole];
   }
 
-  // Add regular target roles
   targetRoles.forEach((role) => {
     if (role && !visibleToRoles.includes(role)) {
       visibleToRoles.push(role);
