@@ -7,13 +7,11 @@ const deletorRoutes = require("./routes/deletor");
 module.exports = function (io) {
   const router = express.Router();
 
-  // Attach io to every request
   router.use((req, res, next) => {
     req.io = io;
     next();
   });
 
-  // Attach routes
   router.use("/", getterRoutes);
   router.use("/", posterRoutes);
   router.use("/", putterRoutes);

@@ -9,17 +9,20 @@ const router = express.Router();
 const calculateVisibleToRoles = (senderRole, targetRole) => {
   let visibleToRoles = [];
 
-  // Add sender role
   if (senderRole) {
     visibleToRoles.push(senderRole);
   }
 
   const targetRoles = Array.isArray(targetRole) ? targetRole : [targetRole];
   
+  if (!targetRole) {
+    visibleToRoles.push("Admin");
+  }
+
   if (targetRoles.includes("All")) {
     return ["Admin", "Client", "Designer"];
   }
-  
+
   if (targetRoles.includes("Internal")) {
     return [senderRole];
   }
@@ -33,7 +36,6 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
   return [...new Set(visibleToRoles)];
 };
 
-// Create new message
 router.post("/Message", async (req, res) => {
   try {
     console.log("📨 Incoming message request:", req.body);
