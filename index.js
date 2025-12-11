@@ -4,6 +4,7 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
+const cron = require("node-cron");
 
 const { getUserRole } = require("./utils/getuserRole.js");
 const emRoutes = require("./em");
@@ -172,14 +173,6 @@ app.use(express.json());
 
 app.use("/em", emRoutes(io));
 
-app.get("/api/test", (req, res) => {
-  res.json({ message: "API is working!", timestamp: new Date().toISOString() });
-});
-
-app.get("/", (req, res) => {
-  res.send("Server is running and accessible!");
-});
-
 app.use((err, req, res, next) => {
   console.error("Error:", err);
   res.status(500).json({ error: "Internal server error" });
@@ -188,6 +181,17 @@ app.use((err, req, res, next) => {
 server.listen(PORT, () => {
   console.log(`🚀 Server running locally on http://localhost:${PORT}`);
   console.log(`📡 Socket.IO server is ready for connections`);
+  
+  const { checkAndProcessImportData } = require("./cron/processImportData");
+  
+  checkAndProcessImportData(io);
+  
+  cron.schedule("*/2 * * * *", () => {
+    console.log("⏰ Running ImportData processing cron job...");
+    checkAndProcessImportData(io);
+  });
+  
+  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
 });
 
 module.exports = app;
