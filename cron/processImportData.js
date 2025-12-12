@@ -8,16 +8,6 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
   const importDataRowsCollection = database.collection('ImportDataRows');
   const item = rowDoc.data;
 
-  await importDataRowsCollection.updateOne(
-    { _id: rowDoc._id },
-    {
-      $set: {
-        status: 'processing',
-        processingStartedAt: new Date()
-      }
-    }
-  );
-
   try {
     const poName = getMappedValue(item, 'POName', columnMapping) || getMappedValue(item, 'PONumber', columnMapping);
     const sku = getMappedValue(item, 'SKU', columnMapping);
@@ -757,7 +747,15 @@ async function processImportDataDocument(importDataDoc, dbClient, database, io) 
   };
 }
 
+let isProcessing = false;
+
 async function checkAndProcessImportData(io) {
+  if (isProcessing) {
+    console.log('⏸️ ImportData processing already in progress, skipping this execution');
+    return;
+  }
+
+  isProcessing = true;
   const dbClient = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
 
   try {
@@ -766,19 +764,51 @@ async function checkAndProcessImportData(io) {
     const importDataCollection = database.collection('ImportData');
     const importDataRowsCollection = database.collection('ImportDataRows');
 
-    const pendingRows = await importDataRowsCollection.find({
+    const candidateRows = await importDataRowsCollection.find({
       status: 'pending'
     }).limit(100).toArray();
 
-    if (pendingRows.length === 0) {
+    if (candidateRows.length === 0) {
       console.log('⏰ No pending ImportDataRows to process');
       return;
     }
 
-    console.log(`📋 Found ${pendingRows.length} pending ImportDataRows to process`);
+    const processingStartedAt = new Date();
+    const candidateIds = candidateRows.map(row => row._id);
+
+    const claimResult = await importDataRowsCollection.updateMany(
+      {
+        _id: { $in: candidateIds },
+        status: 'pending'
+      },
+      {
+        $set: {
+          status: 'processing',
+          processingStartedAt: processingStartedAt
+        }
+      }
+    );
+
+    if (claimResult.modifiedCount === 0) {
+      console.log('⏰ No rows available for processing (may be claimed by another instance)');
+      return;
+    }
+
+    const claimedRows = await importDataRowsCollection.find({
+      _id: { $in: candidateIds },
+      status: 'processing',
+      processingStartedAt: processingStartedAt
+    }).toArray();
+
+    if (claimedRows.length === 0) {
+      console.log('⏰ No rows successfully claimed for processing');
+      return;
+    }
+
+    console.log(`📋 Successfully claimed ${claimedRows.length} ImportDataRows to process`);
 
     const rowsByImportData = {};
-    for (const row of pendingRows) {
+    for (const row of claimedRows) {
       if (!rowsByImportData[row.importDataId]) {
         rowsByImportData[row.importDataId] = [];
       }
@@ -894,7 +924,12 @@ async function checkAndProcessImportData(io) {
   } catch (error) {
     console.error('❌ Error in checkAndProcessImportData:', error);
   } finally {
-    await dbClient.close();
+    try {
+      await dbClient.close();
+    } catch (closeError) {
+      console.error('❌ Error closing database connection:', closeError);
+    }
+    isProcessing = false;
   }
 }
 

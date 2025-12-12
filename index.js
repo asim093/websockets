@@ -1,4 +1,5 @@
 require("dotenv").config();
+const { checkAndProcessImportData } = require("./cron/processImportData");
 
 const express = require("express");
 const http = require("http");
@@ -181,16 +182,21 @@ app.use((err, req, res, next) => {
 server.listen(PORT, () => {
   console.log(`🚀 Server running locally on http://localhost:${PORT}`);
   console.log(`📡 Socket.IO server is ready for connections`);
-  
-  const { checkAndProcessImportData } = require("./cron/processImportData");
-  
-  checkAndProcessImportData(io);
-  
-  cron.schedule("*/2 * * * *", () => {
-    console.log("⏰ Running ImportData processing cron job...");
-    checkAndProcessImportData(io);
+
+
+  checkAndProcessImportData(io).catch((error) => {
+    console.error('❌ Error in initial ImportData processing:', error);
   });
-  
+
+  cron.schedule("*/2 * * * *", async () => {
+    console.log("⏰ Running ImportData processing cron job...");
+    try {
+      await checkAndProcessImportData(io);
+    } catch (error) {
+      console.error('❌ Error in cron job execution:', error);
+    }
+  });
+
   console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
 });
 
