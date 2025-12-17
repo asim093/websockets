@@ -1,6 +1,8 @@
 require("dotenv").config();
 const { MongoClient, ObjectId } = require("mongodb");
 const { getAggregatedData } = require("../EntityHandler/READ");
+const updateEntity = require("../EntityHandler/UPDATE");
+const createEntity = require("../EntityHandler/CREATE");
 const { callMakeWebhook } = require("../utils/webhook");
 const { getMappedValue } = require("../utils/columnMapping");
 
@@ -248,46 +250,64 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         error: `Multiple shipments found with shipping number: ${shippingNumber}`
       });
       return;
-    }
+    } 
 
     let shipmentId;
     if (shipmentData?.data?.length === 1) {
       shipmentId = shipmentData.data[0]._id;
-    } else {
-      const shipmentCollection = database.collection('Shipment');
+      const shipmentUpdatePayload = {
+        shippingNumber: shippingNumber,
+        shippingMode: getMappedValue(item, 'shippingMode', columnMapping) || null,
+        shipDate: getMappedValue(item, 'shipDate', columnMapping) ? new Date(getMappedValue(item, 'shipDate', columnMapping)) : new Date()
+      };
+      const updateRes = await updateEntity('Shipment', shipmentId, shipmentUpdatePayload);
+      if (!updateRes?.success) {
+        throw new Error(updateRes?.message || 'Failed to update shipment');
+      }
+      try {
+        await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: shipmentId }, shipmentId);
+      } catch (webhookError) {
+        console.error("Error calling webhook for Shipment (update):", webhookError);
+      }
+    } else if (shipmentData?.data?.length === 0) {
       const newShipment = {
         shippingNumber: shippingNumber,
         shippingMode: getMappedValue(item, 'shippingMode', columnMapping) || null,
-        arrivalDate: getMappedValue(item, 'arrivalDate', columnMapping) ? new Date(getMappedValue(item, 'arrivalDate', columnMapping)) : new Date(),
-        createdAt: new Date(),
-        updatedAt: new Date()
+        shipDate: getMappedValue(item, 'shipDate', columnMapping) ? new Date(getMappedValue(item, 'shipDate', columnMapping)) : new Date(),
       };
-      const shipmentResult = await shipmentCollection.insertOne(newShipment);
-      shipmentId = shipmentResult.insertedId;
-
-      try {
-        const webhookResult = await callMakeWebhook('Shipment', 'POST', newShipment, { id: shipmentId }, shipmentId);
-        console.log("webhookResult for Shipment POST:", webhookResult);
-      } catch (webhookError) {
-        console.error("Error calling webhook for Shipment:", webhookError);
+      const createRes = await createEntity('Shipment', newShipment);
+      if (!createRes?.success || !createRes?.id) {
+        throw new Error(createRes?.message || 'Failed to create shipment');
       }
-
+      shipmentId = createRes.id;
+      try {
+        await callMakeWebhook('Shipment', 'POST', newShipment, { id: shipmentId }, shipmentId);
+      } catch (webhookError) {
+        console.error("Error calling webhook for Shipment (create):", webhookError);
+      }
     }
 
-    const lineItemCollection = database.collection('lineItem');
-    const updateResult = await lineItemCollection.updateMany(
-      { _id: { $in: validLineItems.map(li => new ObjectId(li._id)) } },
-      {
-        $set: {
-          shipmentId: new ObjectId(shipmentId),
-          shipmentName: shippingNumber,
-          updatedAt: new Date()
+    let modifiedCount = 0;
+    for (const li of validLineItems) {
+      const updatePayload = {
+        shipmentId: new ObjectId(shipmentId),
+        shipmentName: shippingNumber
+      };
+      const updateRes = await updateEntity('lineItem', li._id, updatePayload);
+      if (updateRes?.success) {
+        modifiedCount += 1;
+        try {
+          await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: li._id }, li._id);
+        } catch (webhookError) {
+          console.error("Error calling webhook for lineItem PUT:", webhookError);
         }
+      } else {
+        console.error(`Failed to update line item ${li._id}:`, updateRes?.message);
       }
-    );
+    }
 
-    if (updateResult.modifiedCount > 0) {
-      const message = `Successfully updated ${updateResult.modifiedCount} line item(s)`;
+    if (modifiedCount > 0) {
+      const message = `Successfully updated ${modifiedCount} line item(s)`;
 
       await importDataRowsCollection.updateOne(
         { _id: rowDoc._id },
@@ -605,7 +625,7 @@ async function processImportDataDocument(importDataDoc, dbClient, database, io) 
         const newShipment = {
           shippingNumber: rowResult.shippingNumber,
           shippingMode: getMappedValue(item, 'shippingMode', columnMapping) || null,
-          arrivalDate: getMappedValue(item, 'arrivalDate', columnMapping) ? new Date(getMappedValue(item, 'arrivalDate', columnMapping)) : new Date(),
+          shipDate: getMappedValue(item, 'shipDate', columnMapping) ? new Date(getMappedValue(item, 'shipDate', columnMapping)) : new Date(),
           createdAt: new Date(),
           updatedAt: new Date()
         };
