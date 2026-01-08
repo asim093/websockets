@@ -7,6 +7,154 @@ const { callMakeWebhook } = require("../utils/webhook");
 const { getMappedValue } = require("../utils/columnMapping");
 const { validateRequiredField, handleRowError } = require("../utils/importErrorhandling");
 
+function formatShippingMode(mode) {
+  if (!mode) return null;
+  const modeUpper = mode.toUpperCase();
+  if (modeUpper === 'AIR') {
+    return 'Air';
+  } else if (modeUpper === 'SEA' || modeUpper === 'BOAT') {
+    return 'Sea';
+  }
+  return mode;
+}
+
+function parseDateString(dateString) {
+  if (!dateString) return null;
+
+  try {
+    if (dateString instanceof Date) {
+      if (isNaN(dateString.getTime())) {
+        console.error('Invalid Date object');
+        return null;
+      }
+      return new Date(Date.UTC(
+        dateString.getUTCFullYear(),
+        dateString.getUTCMonth(),
+        dateString.getUTCDate(),
+        0, 0, 0, 0
+      ));
+    }
+
+    const dateStr = String(dateString).trim();
+
+    if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(dateStr)) {
+      const parts = dateStr.split("-");
+      let month, day, year;
+
+      if (parseInt(parts[0], 10) > 12) {
+        day = parseInt(parts[0], 10);
+        month = parseInt(parts[1], 10);
+        year = parseInt(parts[2], 10);
+      } else {
+        month = parseInt(parts[0], 10);
+        day = parseInt(parts[1], 10);
+        year = parseInt(parts[2], 10);
+      }
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) {
+        console.error(`Invalid date format: ${dateStr} (month: ${month}, day: ${day})`);
+        return null;
+      }
+
+      const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      return utcDate;
+    }
+
+    if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(dateStr)) {
+      const parts = dateStr.split("/");
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) {
+        console.error(`Invalid date format: ${dateStr} (month: ${month}, day: ${day})`);
+        return null;
+      }
+
+      const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      return utcDate;
+    }
+
+    if (/^\d{1,2}\/\d{1,2}\/\d{2}$/.test(dateStr)) {
+      const parts = dateStr.split("/");
+      const month = parseInt(parts[0], 10);
+      const day = parseInt(parts[1], 10);
+      let year = parseInt(parts[2], 10);
+      
+      if (year < 100) {
+        year = 2000 + year;
+      }
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) {
+        console.error(`Invalid date format: ${dateStr} (month: ${month}, day: ${day})`);
+        return null;
+      }
+
+      const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      return utcDate;
+    }
+
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
+      const parts = dateStr.split("/");
+      const month = parseInt(parts[0], 10);
+      const day = parseInt(parts[1], 10);
+      const year = parseInt(parts[2], 10);
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) {
+        console.error(`Invalid date format: ${dateStr} (month: ${month}, day: ${day})`);
+        return null;
+      }
+
+      const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      return utcDate;
+    }
+
+    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(dateStr)) {
+      const parts = dateStr.split("-");
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) {
+        console.error(`Invalid date format: ${dateStr} (month: ${month}, day: ${day})`);
+        return null;
+      }
+
+      const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      return utcDate;
+    }
+
+    if (dateStr.includes('T') || dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+      const datePart = dateStr.split('T')[0];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+        const parts = datePart.split('-');
+        const year = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        const day = parseInt(parts[2], 10);
+        const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+        return utcDate;
+      }
+    }
+
+    const parsedDate = new Date(dateStr);
+    if (isNaN(parsedDate.getTime())) {
+      console.error(`Failed to parse date: ${dateStr}`);
+      return null;
+    }
+
+    const utcDate = new Date(Date.UTC(
+      parsedDate.getUTCFullYear(),
+      parsedDate.getUTCMonth(),
+      parsedDate.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    return utcDate;
+  } catch (error) {
+    console.error('Error parsing date:', dateString, error);
+    return null;
+  }
+}
+
 async function processImportDataRow(rowDoc, columnMapping, dbClient, database, io, importDataId, fileName) {
   const importDataRowsCollection = database.collection('ImportDataRows');
   const item = rowDoc.data;
@@ -41,7 +189,6 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       return;
     }
     const po = poData.data[0];
-    console.log('po', po);
 
     const productRequest = {
       entityType: 'Product',
@@ -62,7 +209,6 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
     const product = productData.data[0];
 
-    console.log('product', product);
     const lineItemsRequest = {
       entityType: 'lineItem',
       filter: {
@@ -71,9 +217,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       },
       pagination: { page: 1, pageSize: 1000 }
     };
-    console.log('lineItemsRequest', lineItemsRequest);
     const lineItemsData = await getAggregatedData(lineItemsRequest);
-    console.log('lineItemsData', lineItemsData);
 
     if (!lineItemsData?.data?.length) {
       await handleRowError(importDataRowsCollection, rowDoc, 'No line items found', io, importDataId, fileName);
@@ -109,8 +253,13 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     }
 
     const shippingMode = getMappedValue(item, 'shippingMode', columnMapping) || null;
-    const shipDate = getMappedValue(item, 'shipDate', columnMapping) ? new Date(getMappedValue(item, 'shipDate', columnMapping)) : new Date();
-
+    const shipDateValue = getMappedValue(item, 'shipDate', columnMapping);
+    let shipDate = shipDateValue ? parseDateString(shipDateValue) : null;
+    if (!shipDate) {
+      const now = new Date();
+      shipDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+    }
+    
     let eta = null;
     if (shipDate && shippingMode) {
       eta = new Date(shipDate);
@@ -160,91 +309,328 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     }
 
     let modifiedCount = 0;
+    let errorReason = null;
     for (const li of validLineItems) {
       const existingShipments = Array.isArray(li.shipments) ? li.shipments : [];
-      const existingShipmentIndex = existingShipments.findIndex(
-        s => s.shipmentName === shippingNumber
-      );
-
       let shipmentsArray = [...existingShipments];
       const lineItemSizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
       const hasSizeBreakdown = lineItemSizeBreakdown.length > 0;
 
-      if (existingShipmentIndex >= 0) {
-        const existingShipment = shipmentsArray[existingShipmentIndex];
-        
-        if (hasSizeBreakdown) {
-          const matchingSize = lineItemSizeBreakdown.find(
-            size => size.csmSku && size.csmSku === sku
-          );
+      if (hasSizeBreakdown) {
 
-          if (!matchingSize) {
-            await handleRowError(importDataRowsCollection, rowDoc, `Size not found for SKU: ${sku} in line item sizeBreakdown`, io, importDataId, fileName);
-            return;
+        const matchingSize = lineItemSizeBreakdown.find(
+          size => size.csmSku && size.csmSku === sku
+        );
+
+        if (!matchingSize) {
+          if (dbShipmentId) {
+            const shipmentEntityRequest = {
+              entityType: 'Shipment',
+              filter: { _id: new ObjectId(dbShipmentId) },
+              pagination: { page: 1, pageSize: 1 }
+            };
+            const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
+
+            if (shipmentEntityData?.data?.length > 0) {
+              const currentShipment = shipmentEntityData.data[0];
+              const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
+
+              const existingSuspectedIndex = suspectedProducts.findIndex(
+                sp => sp.sku === sku
+              );
+
+              const suspectedProductData = {
+                sku: sku,
+                quantity: quantity || 0,
+              };
+
+              if (existingSuspectedIndex >= 0) {
+                suspectedProducts[existingSuspectedIndex] = suspectedProductData;
+              } else {
+                suspectedProducts.push(suspectedProductData);
+              }
+
+              const shipmentUpdatePayload = {
+                suspectedProducts: suspectedProducts
+              };
+
+              const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
+              if (updateRes?.success) {
+                try {
+                  await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+                } catch (webhookError) {
+                  console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
+                }
+              }
+            }
+          }
+          await handleRowError(importDataRowsCollection, rowDoc, `Size not found for SKU: ${sku} in line item sizeBreakdown`, io, importDataId, fileName);
+          return;
+        }
+
+        const importQuantity = quantity || parseInt(matchingSize.quantity || 0) || 0;
+        let perfectMatchFound = false;
+        let suspectedProductsAdded = false;
+        let noMatchReason = null;
+
+        for (let i = 0; i < shipmentsArray.length; i++) {
+          const shipment = shipmentsArray[i];
+          const shipmentSizeBreakdown = Array.isArray(shipment.sizeBreakdown) ? shipment.sizeBreakdown : [];
+
+          if (shipmentSizeBreakdown.length > 0) {
+            const matchingShipmentSize = shipmentSizeBreakdown.find(
+              sb => sb.sizeName && sb.sizeName === matchingSize.sizeName
+            );
+
+            if (matchingShipmentSize) {
+              const shipmentSizeQuantity = parseInt(matchingShipmentSize.quantity || 0) || 0;
+              const isSingleSizeShipment = shipmentSizeBreakdown.length === 1;
+              const quantityMatches = isSingleSizeShipment
+                ? (shipmentSizeQuantity === importQuantity && parseInt(shipment.quantity || 0) === importQuantity)
+                : (shipmentSizeQuantity === importQuantity);
+
+              const modeMatches = !shippingMode || !shipment.shippingMode || (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() === shipment.shippingMode.toLowerCase());
+
+
+              if (quantityMatches && modeMatches) {
+                shipmentsArray[i] = {
+                  ...shipment,
+                  shipmentId: dbShipmentId.toString(),
+                  shipmentName: shippingNumber,
+                  shipdate: shipDate ? (() => {
+                    const utcDate = new Date(Date.UTC(
+                      shipDate.getUTCFullYear(),
+                      shipDate.getUTCMonth(),
+                      shipDate.getUTCDate(),
+                      0, 0, 0, 0
+                    ));
+                    return utcDate.toISOString().split('T')[0];
+                  })() : null,
+                  shippingMode: formatShippingMode(shippingMode) || shipment.shippingMode
+                };
+                perfectMatchFound = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!perfectMatchFound && dbShipmentId) {
+          let skuFoundInShipment = false;
+          let quantityMismatch = false;
+          let modeMismatch = false;
+
+          for (let j = 0; j < shipmentsArray.length; j++) {
+            const shipment = shipmentsArray[j];
+            const shipmentSizeBreakdown = Array.isArray(shipment.sizeBreakdown) ? shipment.sizeBreakdown : [];
+            if (shipmentSizeBreakdown.length > 0) {
+              const matchingShipmentSize = shipmentSizeBreakdown.find(
+                sb => sb.sizeName && sb.sizeName === matchingSize.sizeName
+              );
+              if (matchingShipmentSize) {
+                skuFoundInShipment = true;
+                const shipmentSizeQuantity = parseInt(matchingShipmentSize.quantity || 0) || 0;
+                const isSingleSizeShipment = shipmentSizeBreakdown.length === 1;
+                if (isSingleSizeShipment) {
+                  if (shipmentSizeQuantity !== importQuantity || parseInt(shipment.quantity || 0) !== importQuantity) {
+                    quantityMismatch = true;
+                  }
+                } else {
+                  if (shipmentSizeQuantity !== importQuantity) {
+                    quantityMismatch = true;
+                  }
+                }
+                if (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() !== shipment.shippingMode.toLowerCase()) {
+                  modeMismatch = true;
+                }
+                break;
+              }
+            }
           }
 
-          const shipmentSizeBreakdown = Array.isArray(existingShipment.sizeBreakdown) ? existingShipment.sizeBreakdown : [];
-          const sizeBreakdownIndex = shipmentSizeBreakdown.findIndex(
-            sb => sb.sizeName === matchingSize.sizeName
-          );
-
-          const sizeQuantity = quantity || parseInt(matchingSize.quantity || 0) || 0;
-
-          if (sizeBreakdownIndex >= 0) {
-            shipmentSizeBreakdown[sizeBreakdownIndex].quantity = sizeQuantity;
+          if (!skuFoundInShipment) {
+            noMatchReason = `SKU: ${matchingSize.csmSku} not found in any existing shipment's sizeBreakdown`;
+          } else if (quantityMismatch && modeMismatch) {
+            noMatchReason = `SKU: ${matchingSize.csmSku} found but quantity (${importQuantity}) and shipping mode (${shippingMode || 'N/A'}) do not match`;
+          } else if (quantityMismatch) {
+            noMatchReason = `SKU: ${matchingSize.csmSku} found but quantity (${importQuantity}) does not match`;
+          } else if (modeMismatch) {
+            noMatchReason = `SKU: ${matchingSize.csmSku} found but shipping mode (${shippingMode || 'N/A'}) does not match`;
           } else {
-            shipmentSizeBreakdown.push({
-              sizeName: matchingSize.sizeName,
-              quantity: sizeQuantity
-            });
+            noMatchReason = `SKU: ${matchingSize.csmSku} found but no perfect match in existing shipments`;
           }
 
-          const totalQuantity = shipmentSizeBreakdown.reduce(
-            (sum, sb) => sum + (parseInt(sb.quantity || 0) || 0),
-            0
-          );
+          const shipmentEntityRequest = {
+            entityType: 'Shipment',
+            filter: { _id: new ObjectId(dbShipmentId) },
+            pagination: { page: 1, pageSize: 1 }
+          };
+          const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
 
-          shipmentsArray[existingShipmentIndex] = {
-            ...existingShipment,
-            quantity: totalQuantity,
-            sizeBreakdown: shipmentSizeBreakdown
-          };
-        } else {
-          const newQuantity = quantity || parseInt(existingShipment.quantity || 0) || 0;
-          shipmentsArray[existingShipmentIndex] = {
-            ...existingShipment,
-            quantity: newQuantity
-          };
+          if (shipmentEntityData?.data?.length > 0) {
+            const currentShipment = shipmentEntityData.data[0];
+            const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
+
+            const existingSuspectedIndex = suspectedProducts.findIndex(
+              sp => sp.sku === matchingSize.csmSku && sp.sizeName === matchingSize.sizeName
+            );
+
+            const suspectedProductData = {
+              sizeName: matchingSize.sizeName,
+              sku: matchingSize.csmSku,
+              quantity: importQuantity,
+            };
+
+            if (existingSuspectedIndex >= 0) {
+              suspectedProducts[existingSuspectedIndex] = suspectedProductData;
+            } else {
+              suspectedProducts.push(suspectedProductData);
+            }
+
+            const shipmentUpdatePayload = {
+              suspectedProducts: suspectedProducts
+            };
+
+            const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
+            if (updateRes?.success) {
+              suspectedProductsAdded = true;
+              try {
+                await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+              } catch (webhookError) {
+                console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
+              }
+            }
+          }
         }
+
+        if (suspectedProductsAdded) {
+          errorReason = noMatchReason || `No perfect match found for SKU: ${matchingSize.csmSku} in line item shipments. Added to suspectedProducts.`;
+          continue;
+        }
+
       } else {
-        if (hasSizeBreakdown) {
-          const matchingSize = lineItemSizeBreakdown.find(
-            size => size.csmSku && size.csmSku === sku
-          );
+        const importQty = quantity || parseInt(li.quantity || 0) || 0;
+        let perfectMatchFound = false;
+        let suspectedProductsAdded = false;
+        let noMatchReason = null;
 
-          if (!matchingSize) {
-            await handleRowError(importDataRowsCollection, rowDoc, `Size not found for SKU: ${sku} in line item sizeBreakdown`, io, importDataId, fileName);
-            return;
+        for (let i = 0; i < shipmentsArray.length; i++) {
+          const shipment = shipmentsArray[i];
+
+          if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
+            const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
+            const quantityMatches = shipmentQuantity === importQty;
+            const modeMatches = !shippingMode || !shipment.shippingMode || (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() === shipment.shippingMode.toLowerCase());
+
+            if (quantityMatches && modeMatches) {
+              shipmentsArray[i] = {
+                ...shipment,
+                shipmentId: dbShipmentId.toString(),
+                shipmentName: shippingNumber,
+                shipdate: shipDate ? (() => {
+                  const utcDate = new Date(Date.UTC(
+                    shipDate.getUTCFullYear(),
+                    shipDate.getUTCMonth(),
+                    shipDate.getUTCDate(),
+                    0, 0, 0, 0
+                  ));
+                  return utcDate.toISOString().split('T')[0];
+                })() : null,
+                shippingMode: formatShippingMode(shippingMode) || shipment.shippingMode
+              };
+              perfectMatchFound = true;
+              break;
+            }
+          }
+        }
+
+        if (!perfectMatchFound && dbShipmentId) {
+          let quantityFound = false;
+          let quantityMismatch = false;
+          let modeMismatch = false;
+
+          for (let j = 0; j < shipmentsArray.length; j++) {
+            const shipment = shipmentsArray[j];
+            if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
+              const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
+              if (shipmentQuantity > 0) {
+                quantityFound = true;
+                if (shipmentQuantity !== importQty) {
+                  quantityMismatch = true;
+                }
+                if (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() !== shipment.shippingMode.toLowerCase()) {
+                  modeMismatch = true;
+                }
+              }
+            }
           }
 
-          const sizeQuantity = quantity || parseInt(matchingSize.quantity || 0) || 0;
-          shipmentsArray.push({
-            shipmentId: dbShipmentId.toString(),
-            shipmentName: shippingNumber,
-            quantity: sizeQuantity,
-            sizeBreakdown: [{
-              sizeName: matchingSize.sizeName,
-              quantity: sizeQuantity
-            }]
-          });
-        } else {
-          const defaultQuantity = quantity || parseInt(li.quantity || 0) || 0;
-          shipmentsArray.push({
-            shipmentId: dbShipmentId.toString(),
-            shipmentName: shippingNumber,
-            quantity: defaultQuantity
-          });
+          if (quantityFound) {
+            if (quantityMismatch && modeMismatch) {
+              noMatchReason = `Quantity (${importQty}) and shipping mode (${shippingMode || 'N/A'}) do not match any existing shipment`;
+            } else if (quantityMismatch) {
+              noMatchReason = `Quantity (${importQty}) does not match any existing shipment`;
+            } else if (modeMismatch) {
+              noMatchReason = `Shipping mode (${shippingMode || 'N/A'}) does not match any existing shipment`;
+            } else {
+              noMatchReason = `No perfect match found for quantity: ${importQty} and shipping mode: ${shippingMode || 'N/A'}`;
+            }
+
+            const shipmentEntityRequest = {
+              entityType: 'Shipment',
+              filter: { _id: new ObjectId(dbShipmentId) },
+              pagination: { page: 1, pageSize: 1 }
+            };
+            const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
+
+            if (shipmentEntityData?.data?.length > 0) {
+              const currentShipment = shipmentEntityData.data[0];
+              const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
+
+              const existingSuspectedIndex = suspectedProducts.findIndex(
+                sp => sp.sku === product.sku
+              );
+
+              const suspectedProductData = {
+                sku: product.sku,
+                quantity: importQty,
+              };
+
+              if (existingSuspectedIndex >= 0) {
+                suspectedProducts[existingSuspectedIndex] = suspectedProductData;
+              } else {
+                suspectedProducts.push(suspectedProductData);
+              }
+
+              const shipmentUpdatePayload = {
+                suspectedProducts: suspectedProducts
+              };
+
+              const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
+              if (updateRes?.success) {
+                suspectedProductsAdded = true;
+                try {
+                  await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+                } catch (webhookError) {
+                  console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
+                }
+              }
+            }
+          } else {
+            // Line item has no shipments, so don't add to suspectedProducts
+            noMatchReason = `No shipment found with quantity in line item shipments`;
+          }
         }
+
+        if (suspectedProductsAdded) {
+          errorReason = noMatchReason || `No perfect match found for quantity: ${importQty} and shipping mode: ${shippingMode || 'N/A'} in line item shipments. Added to suspectedProducts.`;
+          continue;
+        }
+      }
+
+      if (shipmentsArray.length > existingShipments.length) {
+        console.error(`❌ ERROR: shipmentsArray length increased from ${existingShipments.length} to ${shipmentsArray.length}. New objects should never be created!`);
+        throw new Error(`Invalid state: shipmentsArray length increased. This should never happen. Original: ${existingShipments.length}, New: ${shipmentsArray.length}`);
       }
 
       const updatePayload = {
@@ -260,12 +646,14 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           console.error("Error calling webhook for lineItem PUT:", webhookError);
         }
       } else {
-        console.error(`Failed to update line item ${li._id}:`, updateRes?.message);
+        const errorMsg = updateRes?.message || 'Unknown error';
+        errorReason = `Failed to update line item: ${errorMsg}`;
+        console.error(`Failed to update line item ${li._id}:`, errorMsg);
       }
     }
 
     if (modifiedCount > 0) {
-      const message = `Successfully updated ${modifiedCount} line item(s)`;
+      const message = `Successfully processed ${modifiedCount} line item(s)`;
 
       await importDataRowsCollection.updateOne(
         { _id: rowDoc._id },
@@ -278,7 +666,6 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         }
       );
 
-
       io.emit('importDataProgress', {
         importDataId: importDataId,
         fileName: fileName,
@@ -287,7 +674,18 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         message: message
       });
     } else {
-      await handleRowError(importDataRowsCollection, rowDoc, 'Failed to update line items', io, importDataId, fileName);
+      let errorMessage = 'Failed to update line items';
+      if (errorReason) {
+        errorMessage = errorReason;
+      } else {
+        const hasSizeBreakdown = lineItems[0]?.sizeBreakdown && Array.isArray(lineItems[0].sizeBreakdown) && lineItems[0].sizeBreakdown.length > 0;
+        if (hasSizeBreakdown) {
+          errorMessage = `No perfect match found for SKU: ${sku} in line item shipments. Quantity or shipping mode mismatch. Added to suspectedProducts.`;
+        } else {
+          errorMessage = `No perfect match found for quantity: ${quantity || 'N/A'} and shipping mode: ${shippingMode || 'N/A'} in line item shipments. Added to suspectedProducts.`;
+        }
+      }
+      await handleRowError(importDataRowsCollection, rowDoc, errorMessage, io, importDataId, fileName);
     }
 
   } catch (error) {
