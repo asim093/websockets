@@ -14,13 +14,14 @@ function formatShippingMode(mode) {
     return 'Air';
   } else if (modeUpper === 'SEA' || modeUpper === 'BOAT') {
     return 'Sea';
+  } else if (modeUpper === 'GROUND') {
+    return 'Ground';
   }
   return mode;
 }
 
 function parseDateString(dateString) {
   if (!dateString) return null;
-
   try {
     if (dateString instanceof Date) {
       if (isNaN(dateString.getTime())) {
@@ -80,7 +81,7 @@ function parseDateString(dateString) {
       const month = parseInt(parts[0], 10);
       const day = parseInt(parts[1], 10);
       let year = parseInt(parts[2], 10);
-      
+
       if (year < 100) {
         year = 2000 + year;
       }
@@ -159,6 +160,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
   const importDataRowsCollection = database.collection('ImportDataRows');
   const item = rowDoc.data;
 
+  const trackingData = {
+    sizePricingLineItemIds: [],
+    shipmentIds: []
+  };
+
   try {
     const poName = getMappedValue(item, 'POName', columnMapping) || getMappedValue(item, 'PONumber', columnMapping);
     const sku = getMappedValue(item, 'SKU', columnMapping);
@@ -168,7 +174,8 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     const requiredFields = [
       { value: poName, name: 'POName' },
       { value: shippingNumber, name: 'shippingNumber' },
-      { value: sku, name: 'sku' }
+      { value: sku, name: 'sku' },
+      { value: quantity, name: "quantity" }
     ];
 
     for (const field of requiredFields) {
@@ -197,40 +204,108 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     };
     const productData = await getAggregatedData(productRequest);
 
-    if (!productData?.data?.length) {
-      await handleRowError(importDataRowsCollection, rowDoc, `Product not found: ${sku}`, io, importDataId, fileName);
-      return;
+    let product = null;
+    let lineItem = null;
+    let isSizePricingCase = false;
+
+    if (productData?.data?.length > 0) {
+      if (productData.data.length > 1) {
+        await handleRowError(importDataRowsCollection, rowDoc, `Multiple products found with SKU: ${sku}`, io, importDataId, fileName);
+        return;
+      }
+
+      product = productData.data[0];
+
+      const lineItemsRequest = {
+        entityType: 'lineItem',
+        filter: {
+          poId: { $eq: new ObjectId(po._id) },
+          productId: { $eq: new ObjectId(product._id) }
+        },
+        pagination: { page: 1, pageSize: 1000 }
+      };
+      const lineItemsData = await getAggregatedData(lineItemsRequest);
+
+      if (!lineItemsData?.data?.length) {
+        await handleRowError(importDataRowsCollection, rowDoc, 'No line items found', io, importDataId, fileName);
+        return;
+      }
+      const lineItems = lineItemsData.data;
+
+      if (lineItems.length > 1) {
+        await handleRowError(importDataRowsCollection, rowDoc, `Multiple line items found for PO: ${poName} and SKU: ${sku}`, io, importDataId, fileName);
+        return;
+      }
+
+      lineItem = lineItems[0];
+      isSizePricingCase = false;
+
+    } else {
+      const lineItemsRequest = {
+        entityType: 'lineItem',
+        filter: {
+          poId: { $eq: new ObjectId(po._id) },
+          'sizeBreakdown.csmSku': sku
+        },
+        pagination: { page: 1, pageSize: 1000 }
+      };
+      const lineItemsData = await getAggregatedData(lineItemsRequest);
+
+      if (!lineItemsData?.data?.length) {
+        await handleRowError(importDataRowsCollection, rowDoc, `No line item found with matching csmSku ${sku} in sizeBreakdown`, io, importDataId, fileName);
+        return;
+      }
+      const allMatchingLineItems = lineItemsData.data;
+
+      let foundLineItem = null;
+      let foundMatchingSize = null;
+
+      for (const li of allMatchingLineItems) {
+        const lineItemSizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
+        const matchingSize = lineItemSizeBreakdown.find(
+          size => size.csmSku && size.csmSku === sku
+        );
+
+        if (matchingSize) {
+          if (quantity) {
+            const importQty = parseInt(quantity);
+            if (parseInt(matchingSize.quantity || 0) === importQty) {
+              foundLineItem = li;
+              foundMatchingSize = matchingSize;
+              break;
+            }
+          } else {
+            if (!foundLineItem) {
+              foundLineItem = li;
+              foundMatchingSize = matchingSize;
+            }
+          }
+        }
+      }
+
+      if (!foundLineItem && allMatchingLineItems.length > 0) {
+        const firstLi = allMatchingLineItems[0];
+        const lineItemSizeBreakdown = Array.isArray(firstLi.sizeBreakdown) ? firstLi.sizeBreakdown : [];
+        const matchingSize = lineItemSizeBreakdown.find(
+          size => size.csmSku && size.csmSku === sku
+        );
+        if (matchingSize) {
+          foundLineItem = firstLi;
+          foundMatchingSize = matchingSize;
+        }
+      }
+
+      if (!foundLineItem) {
+        const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+        if (existingRowCheck?.status !== 'pending' && existingRowCheck?.status !== 'success') {
+          await handleRowError(importDataRowsCollection, rowDoc, `Product not found: ${sku} and no matching size found in line items`, io, importDataId, fileName);
+        }
+        return;
+      }
+
+      lineItem = foundLineItem;
+      isSizePricingCase = true;
     }
-
-    if (productData?.data?.length > 1) {
-      await handleRowError(importDataRowsCollection, rowDoc, `Multiple products found with SKU: ${sku}`, io, importDataId, fileName);
-      return;
-    }
-
-    const product = productData.data[0];
-
-    const lineItemsRequest = {
-      entityType: 'lineItem',
-      filter: {
-        poId: { $eq: new ObjectId(po._id) },
-        productId: { $eq: new ObjectId(product._id) }
-      },
-      pagination: { page: 1, pageSize: 1000 }
-    };
-    const lineItemsData = await getAggregatedData(lineItemsRequest);
-
-    if (!lineItemsData?.data?.length) {
-      await handleRowError(importDataRowsCollection, rowDoc, 'No line items found', io, importDataId, fileName);
-      return;
-    }
-    const lineItems = lineItemsData.data;
-
-    if (lineItems.length > 1) {
-      await handleRowError(importDataRowsCollection, rowDoc, `Multiple line items found for PO: ${poName} and SKU: ${sku}`, io, importDataId, fileName);
-      return;
-    }
-
-    const lineItem = lineItems[0];
     const lineItemStatus = lineItem.status || '';
 
     if (lineItemStatus === 'Invoiced' || lineItemStatus === 'Delivered') {
@@ -252,7 +327,8 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       return;
     }
 
-    const shippingMode = getMappedValue(item, 'shippingMode', columnMapping) || null;
+    const shippingModeRaw = getMappedValue(item, 'shippingMode', columnMapping) || null;
+    const shippingMode = shippingModeRaw ? formatShippingMode(shippingModeRaw) : null;
     const shipDateValue = getMappedValue(item, 'shipDate', columnMapping);
     let shipDate = shipDateValue ? parseDateString(shipDateValue) : null;
     if (!shipDate) {
@@ -268,12 +344,15 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         eta.setDate(eta.getDate() + 14);
       } else if (shippingModeUpper === 'SEA' || shippingModeUpper === 'BOAT') {
         eta.setDate(eta.getDate() + 35);
+      } else if (shippingModeUpper === 'GROUND') {
+        eta.setDate(eta.getDate() + 3);
       }
     }
 
     let dbShipmentId;
     if (shipmentData?.data?.length === 1) {
       dbShipmentId = shipmentData.data[0]._id;
+      trackingData.shipmentIds.push(dbShipmentId.toString());
       const shipmentUpdatePayload = {
         shippingNumber: shippingNumber,
         shippingMode: shippingMode,
@@ -301,6 +380,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         throw new Error(createRes?.message || 'Failed to create shipment');
       }
       dbShipmentId = createRes.id;
+      trackingData.shipmentIds.push(dbShipmentId.toString());
       try {
         await callMakeWebhook('Shipment', 'POST', newShipment, { id: dbShipmentId }, dbShipmentId);
       } catch (webhookError) {
@@ -310,156 +390,60 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
     let modifiedCount = 0;
     let errorReason = null;
+    let sizePricingAddedToSuspected = false;
+    let sizePricingProcessed = false;
+    let normalPricingAddedToSuspected = false;
     for (const li of validLineItems) {
       const existingShipments = Array.isArray(li.shipments) ? li.shipments : [];
       let shipmentsArray = [...existingShipments];
       const lineItemSizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
       const hasSizeBreakdown = lineItemSizeBreakdown.length > 0;
 
-      if (hasSizeBreakdown) {
+      if (isSizePricingCase) {
+        trackingData.sizePricingLineItemIds.push(li._id.toString());
 
-        const matchingSize = lineItemSizeBreakdown.find(
+        const matchingSizes = lineItemSizeBreakdown.filter(
           size => size.csmSku && size.csmSku === sku
         );
 
+        if (matchingSizes.length === 0) {
+          continue;
+        }
+
+        if (matchingSizes.length > 1) {
+          const sizeNames = matchingSizes.map(s => s.sizeName).filter(Boolean).join(', ');
+          await handleRowError(importDataRowsCollection, rowDoc, `Multiple sizes found with same SKU ${sku} in sizeBreakdown: ${sizeNames}. Please specify size or quantity to match.`, io, importDataId, fileName);
+          return { trackingData };
+        }
+
+        let currentSuspectedProducts = [];
+        if (dbShipmentId) {
+          const shipmentEntityRequest = {
+            entityType: 'Shipment',
+            filter: { _id: new ObjectId(dbShipmentId) },
+            pagination: { page: 1, pageSize: 1 }
+          };
+          const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
+          if (shipmentEntityData?.data?.length > 0) {
+            currentSuspectedProducts = Array.isArray(shipmentEntityData.data[0].suspectedProducts)
+              ? [...shipmentEntityData.data[0].suspectedProducts]
+              : [];
+          }
+        }
+
+        let matchingSize = matchingSizes.find(size => {
+          return !currentSuspectedProducts.some(
+            sp => sp.sku === size.csmSku && sp.sizeName === size.sizeName
+          );
+        });
+
         if (!matchingSize) {
-          if (dbShipmentId) {
-            const shipmentEntityRequest = {
-              entityType: 'Shipment',
-              filter: { _id: new ObjectId(dbShipmentId) },
-              pagination: { page: 1, pageSize: 1 }
-            };
-            const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
-
-            if (shipmentEntityData?.data?.length > 0) {
-              const currentShipment = shipmentEntityData.data[0];
-              const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
-
-              const existingSuspectedIndex = suspectedProducts.findIndex(
-                sp => sp.sku === sku
-              );
-
-              const suspectedProductData = {
-                sku: sku,
-                quantity: quantity || 0,
-              };
-
-              if (existingSuspectedIndex >= 0) {
-                suspectedProducts[existingSuspectedIndex] = suspectedProductData;
-              } else {
-                suspectedProducts.push(suspectedProductData);
-              }
-
-              const shipmentUpdatePayload = {
-                suspectedProducts: suspectedProducts
-              };
-
-              const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
-              if (updateRes?.success) {
-                try {
-                  await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
-                } catch (webhookError) {
-                  console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
-                }
-              }
-            }
-          }
-          await handleRowError(importDataRowsCollection, rowDoc, `Size not found for SKU: ${sku} in line item sizeBreakdown`, io, importDataId, fileName);
-          return;
+          matchingSize = matchingSizes[0];
         }
 
-        const importQuantity = quantity || parseInt(matchingSize.quantity || 0) || 0;
-        let perfectMatchFound = false;
-        let suspectedProductsAdded = false;
-        let noMatchReason = null;
+        const finalQuantity = quantity ? parseInt(quantity) : parseInt(matchingSize.quantity || 0) || 0;
 
-        for (let i = 0; i < shipmentsArray.length; i++) {
-          const shipment = shipmentsArray[i];
-          const shipmentSizeBreakdown = Array.isArray(shipment.sizeBreakdown) ? shipment.sizeBreakdown : [];
-
-          if (shipmentSizeBreakdown.length > 0) {
-            const matchingShipmentSize = shipmentSizeBreakdown.find(
-              sb => sb.sizeName && sb.sizeName === matchingSize.sizeName
-            );
-
-            if (matchingShipmentSize) {
-              const shipmentSizeQuantity = parseInt(matchingShipmentSize.quantity || 0) || 0;
-              const isSingleSizeShipment = shipmentSizeBreakdown.length === 1;
-              const quantityMatches = isSingleSizeShipment
-                ? (shipmentSizeQuantity === importQuantity && parseInt(shipment.quantity || 0) === importQuantity)
-                : (shipmentSizeQuantity === importQuantity);
-
-              const modeMatches = !shippingMode || !shipment.shippingMode || (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() === shipment.shippingMode.toLowerCase());
-
-
-              if (quantityMatches && modeMatches) {
-                shipmentsArray[i] = {
-                  ...shipment,
-                  shipmentId: dbShipmentId.toString(),
-                  shipmentName: shippingNumber,
-                  shipdate: shipDate ? (() => {
-                    const utcDate = new Date(Date.UTC(
-                      shipDate.getUTCFullYear(),
-                      shipDate.getUTCMonth(),
-                      shipDate.getUTCDate(),
-                      0, 0, 0, 0
-                    ));
-                    return utcDate.toISOString().split('T')[0];
-                  })() : null,
-                  shippingMode: formatShippingMode(shippingMode) || shipment.shippingMode
-                };
-                perfectMatchFound = true;
-                break;
-              }
-            }
-          }
-        }
-
-        if (!perfectMatchFound && dbShipmentId) {
-          let skuFoundInShipment = false;
-          let quantityMismatch = false;
-          let modeMismatch = false;
-
-          for (let j = 0; j < shipmentsArray.length; j++) {
-            const shipment = shipmentsArray[j];
-            const shipmentSizeBreakdown = Array.isArray(shipment.sizeBreakdown) ? shipment.sizeBreakdown : [];
-            if (shipmentSizeBreakdown.length > 0) {
-              const matchingShipmentSize = shipmentSizeBreakdown.find(
-                sb => sb.sizeName && sb.sizeName === matchingSize.sizeName
-              );
-              if (matchingShipmentSize) {
-                skuFoundInShipment = true;
-                const shipmentSizeQuantity = parseInt(matchingShipmentSize.quantity || 0) || 0;
-                const isSingleSizeShipment = shipmentSizeBreakdown.length === 1;
-                if (isSingleSizeShipment) {
-                  if (shipmentSizeQuantity !== importQuantity || parseInt(shipment.quantity || 0) !== importQuantity) {
-                    quantityMismatch = true;
-                  }
-                } else {
-                  if (shipmentSizeQuantity !== importQuantity) {
-                    quantityMismatch = true;
-                  }
-                }
-                if (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() !== shipment.shippingMode.toLowerCase()) {
-                  modeMismatch = true;
-                }
-                break;
-              }
-            }
-          }
-
-          if (!skuFoundInShipment) {
-            noMatchReason = `SKU: ${matchingSize.csmSku} not found in any existing shipment's sizeBreakdown`;
-          } else if (quantityMismatch && modeMismatch) {
-            noMatchReason = `SKU: ${matchingSize.csmSku} found but quantity (${importQuantity}) and shipping mode (${shippingMode || 'N/A'}) do not match`;
-          } else if (quantityMismatch) {
-            noMatchReason = `SKU: ${matchingSize.csmSku} found but quantity (${importQuantity}) does not match`;
-          } else if (modeMismatch) {
-            noMatchReason = `SKU: ${matchingSize.csmSku} found but shipping mode (${shippingMode || 'N/A'}) does not match`;
-          } else {
-            noMatchReason = `SKU: ${matchingSize.csmSku} found but no perfect match in existing shipments`;
-          }
-
+        if (dbShipmentId) {
           const shipmentEntityRequest = {
             entityType: 'Shipment',
             filter: { _id: new ObjectId(dbShipmentId) },
@@ -472,13 +456,15 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
 
             const existingSuspectedIndex = suspectedProducts.findIndex(
-              sp => sp.sku === matchingSize.csmSku && sp.sizeName === matchingSize.sizeName
+              sp => sp.sku === matchingSize.csmSku && 
+                    sp.sizeName === matchingSize.sizeName &&
+                    parseInt(sp.quantity || 0) === finalQuantity
             );
 
             const suspectedProductData = {
               sizeName: matchingSize.sizeName,
               sku: matchingSize.csmSku,
-              quantity: importQuantity,
+              quantity: finalQuantity,
             };
 
             if (existingSuspectedIndex >= 0) {
@@ -493,7 +479,8 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
             const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
             if (updateRes?.success) {
-              suspectedProductsAdded = true;
+              sizePricingAddedToSuspected = true;
+              sizePricingProcessed = true;
               try {
                 await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
               } catch (webhookError) {
@@ -503,16 +490,35 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           }
         }
 
-        if (suspectedProductsAdded) {
-          errorReason = noMatchReason || `No perfect match found for SKU: ${matchingSize.csmSku} in line item shipments. Added to suspectedProducts.`;
-          continue;
+        if (sizePricingProcessed) {
+          const message = `SizePricing line item - added to suspectedProducts. Will be processed in reconciliation.`;
+
+          await importDataRowsCollection.updateOne(
+            { _id: rowDoc._id },
+            {
+              $set: {
+                status: 'pending_reconciliation',
+                message: message,
+                processedAt: new Date()
+              }
+            }
+          );
+
+          io.emit('importDataProgress', {
+            importDataId: importDataId,
+            fileName: fileName,
+            rowId: rowDoc._id.toString(),
+            status: 'pending_reconciliation',
+            message: message
+          });
         }
+
+        continue;
 
       } else {
         const importQty = quantity || parseInt(li.quantity || 0) || 0;
         let perfectMatchFound = false;
-        let suspectedProductsAdded = false;
-        let noMatchReason = null;
+        let quantityFoundInAnyShipment = false;
 
         for (let i = 0; i < shipmentsArray.length; i++) {
           const shipment = shipmentsArray[i];
@@ -520,7 +526,10 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
             const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
             const quantityMatches = shipmentQuantity === importQty;
-            const modeMatches = !shippingMode || !shipment.shippingMode || (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() === shipment.shippingMode.toLowerCase());
+            const formattedShippingMode = formatShippingMode(shippingMode);
+            const shipmentShippingMode = shipment.shippingMode || null;
+            const modeMatches = formattedShippingMode && shipmentShippingMode &&
+              formattedShippingMode.toLowerCase() === shipmentShippingMode.toLowerCase();
 
             if (quantityMatches && modeMatches) {
               shipmentsArray[i] = {
@@ -535,95 +544,63 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
                     0, 0, 0, 0
                   ));
                   return utcDate.toISOString().split('T')[0];
-                })() : null,
-                shippingMode: formatShippingMode(shippingMode) || shipment.shippingMode
+                })() : null
               };
               perfectMatchFound = true;
               break;
+            }
+
+            if (shipmentQuantity > 0) {
+              quantityFoundInAnyShipment = true;
             }
           }
         }
 
         if (!perfectMatchFound && dbShipmentId) {
-          let quantityFound = false;
-          let quantityMismatch = false;
-          let modeMismatch = false;
+          const shipmentEntityRequest = {
+            entityType: 'Shipment',
+            filter: { _id: new ObjectId(dbShipmentId) },
+            pagination: { page: 1, pageSize: 1 }
+          };
+          const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
 
-          for (let j = 0; j < shipmentsArray.length; j++) {
-            const shipment = shipmentsArray[j];
-            if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
-              const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
-              if (shipmentQuantity > 0) {
-                quantityFound = true;
-                if (shipmentQuantity !== importQty) {
-                  quantityMismatch = true;
-                }
-                if (shippingMode && shipment.shippingMode && shippingMode.toLowerCase() !== shipment.shippingMode.toLowerCase()) {
-                  modeMismatch = true;
-                }
-              }
-            }
-          }
+          if (shipmentEntityData?.data?.length > 0) {
+            const currentShipment = shipmentEntityData.data[0];
+            const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
 
-          if (quantityFound) {
-            if (quantityMismatch && modeMismatch) {
-              noMatchReason = `Quantity (${importQty}) and shipping mode (${shippingMode || 'N/A'}) do not match any existing shipment`;
-            } else if (quantityMismatch) {
-              noMatchReason = `Quantity (${importQty}) does not match any existing shipment`;
-            } else if (modeMismatch) {
-              noMatchReason = `Shipping mode (${shippingMode || 'N/A'}) does not match any existing shipment`;
-            } else {
-              noMatchReason = `No perfect match found for quantity: ${importQty} and shipping mode: ${shippingMode || 'N/A'}`;
-            }
+            const existingSuspectedIndex = suspectedProducts.findIndex(
+              sp => sp.sku === product.sku && !sp.sizeName
+            );
 
-            const shipmentEntityRequest = {
-              entityType: 'Shipment',
-              filter: { _id: new ObjectId(dbShipmentId) },
-              pagination: { page: 1, pageSize: 1 }
+            const suspectedProductData = {
+              sku: product.sku,
+              quantity: importQty,
             };
-            const shipmentEntityData = await getAggregatedData(shipmentEntityRequest);
 
-            if (shipmentEntityData?.data?.length > 0) {
-              const currentShipment = shipmentEntityData.data[0];
-              const suspectedProducts = Array.isArray(currentShipment.suspectedProducts) ? [...currentShipment.suspectedProducts] : [];
+            if (existingSuspectedIndex >= 0) {
+              suspectedProducts[existingSuspectedIndex] = suspectedProductData;
+            } else {
+              suspectedProducts.push(suspectedProductData);
+            }
 
-              const existingSuspectedIndex = suspectedProducts.findIndex(
-                sp => sp.sku === product.sku
-              );
+            const shipmentUpdatePayload = {
+              suspectedProducts: suspectedProducts
+            };
 
-              const suspectedProductData = {
-                sku: product.sku,
-                quantity: importQty,
-              };
-
-              if (existingSuspectedIndex >= 0) {
-                suspectedProducts[existingSuspectedIndex] = suspectedProductData;
-              } else {
-                suspectedProducts.push(suspectedProductData);
-              }
-
-              const shipmentUpdatePayload = {
-                suspectedProducts: suspectedProducts
-              };
-
-              const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
-              if (updateRes?.success) {
-                suspectedProductsAdded = true;
-                try {
-                  await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
-                } catch (webhookError) {
-                  console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
-                }
+            const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
+            if (updateRes?.success) {
+              normalPricingAddedToSuspected = true;
+              try {
+                await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+              } catch (webhookError) {
+                console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
               }
             }
-          } else {
-            // Line item has no shipments, so don't add to suspectedProducts
-            noMatchReason = `No shipment found with quantity in line item shipments`;
           }
-        }
 
-        if (suspectedProductsAdded) {
-          errorReason = noMatchReason || `No perfect match found for quantity: ${importQty} and shipping mode: ${shippingMode || 'N/A'} in line item shipments. Added to suspectedProducts.`;
+          errorReason = quantityFoundInAnyShipment
+            ? `Quantity (${importQty}) or shipping mode (${shippingMode || 'N/A'}) does not match any existing shipment. Added to suspectedProducts.`
+            : `No shipment found with quantity in line item shipments. Added to suspectedProducts.`;
           continue;
         }
       }
@@ -665,6 +642,40 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           }
         }
       );
+    } else if (sizePricingAddedToSuspected && !sizePricingProcessed) {
+      const message = `SizePricing line item - added to suspectedProducts. Will be processed in reconciliation.`;
+
+      await importDataRowsCollection.updateOne(
+        { _id: rowDoc._id },
+        {
+          $set: {
+            status: 'pending_reconciliation',
+            message: message,
+            processedAt: new Date()
+          }
+        }
+      );
+
+      io.emit('importDataProgress', {
+        importDataId: importDataId,
+        fileName: fileName,
+        rowId: rowDoc._id.toString(),
+        status: 'pending_reconciliation',
+        message: message
+      });
+    } else if (normalPricingAddedToSuspected) {
+      const message = errorReason || `Added to suspectedProducts. No perfect match found for quantity and shipping mode.`;
+
+      await importDataRowsCollection.updateOne(
+        { _id: rowDoc._id },
+        {
+          $set: {
+            status: 'success',
+            message: message,
+            processedAt: new Date()
+          }
+        }
+      );
 
       io.emit('importDataProgress', {
         importDataId: importDataId,
@@ -674,11 +685,20 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         message: message
       });
     } else {
+      const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+      if (existingRowCheck?.status === 'pending_reconciliation' || existingRowCheck?.status === 'pending' || existingRowCheck?.status === 'success') {
+        return { trackingData };
+      }
+
+      if (sizePricingProcessed || sizePricingAddedToSuspected) {
+        return { trackingData };
+      }
+
       let errorMessage = 'Failed to update line items';
       if (errorReason) {
         errorMessage = errorReason;
       } else {
-        const hasSizeBreakdown = lineItems[0]?.sizeBreakdown && Array.isArray(lineItems[0].sizeBreakdown) && lineItems[0].sizeBreakdown.length > 0;
+        const hasSizeBreakdown = lineItem?.sizeBreakdown && Array.isArray(lineItem.sizeBreakdown) && lineItem.sizeBreakdown.length > 0;
         if (hasSizeBreakdown) {
           errorMessage = `No perfect match found for SKU: ${sku} in line item shipments. Quantity or shipping mode mismatch. Added to suspectedProducts.`;
         } else {
@@ -688,8 +708,20 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       await handleRowError(importDataRowsCollection, rowDoc, errorMessage, io, importDataId, fileName);
     }
 
+    return { trackingData };
+
   } catch (error) {
     console.error(`❌ Error processing row ${rowDoc._id}:`, error);
+
+    const existingRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+
+    if (existingRow?.status === 'pending_reconciliation') {
+      return { trackingData };
+    }
+
+    if (existingRow?.status === 'pending' || existingRow?.status === 'success') {
+      return { trackingData };
+    }
 
     await importDataRowsCollection.updateOne(
       { _id: rowDoc._id },
@@ -710,7 +742,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       status: 'failure',
       error: error.message
     });
+
+    return { trackingData };
   }
+
+  return { trackingData };
 }
 
 let isProcessing = false;
@@ -803,9 +839,19 @@ async function checkAndProcessImportData(io) {
       const pendingCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'pending' });
       const processingCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'processing' });
 
+      const allTrackingData = {
+        sizePricingLineItemIds: [],
+        shipmentIds: []
+      };
+
       for (const rowDoc of rows) {
         try {
-          await processImportDataRow(rowDoc, columnMapping, dbClient, database, io, importDataId.toString(), fileName);
+          const result = await processImportDataRow(rowDoc, columnMapping, dbClient, database, io, importDataId.toString(), fileName);
+
+          if (result?.trackingData) {
+            allTrackingData.sizePricingLineItemIds.push(...result.trackingData.sizePricingLineItemIds);
+            allTrackingData.shipmentIds.push(...result.trackingData.shipmentIds);
+          }
 
           const currentSuccess = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'success' });
           const currentFailure = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'failure' });
@@ -824,6 +870,17 @@ async function checkAndProcessImportData(io) {
           });
 
           if (currentPending === 0 && currentProcessing === 0) {
+            const uniqueLineItemIds = [...new Set(allTrackingData.sizePricingLineItemIds)];
+            const uniqueShipmentIds = [...new Set(allTrackingData.shipmentIds)];
+
+            if (uniqueLineItemIds.length > 0 && uniqueShipmentIds.length > 0) {
+              await reconcileSizePricingLineItems(database, io, importDataId.toString(), fileName, uniqueLineItemIds, uniqueShipmentIds);
+            }
+
+            const finalSuccessCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'success' });
+            const finalFailureCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'failure' });
+            const finalPendingReconciliationCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'pending_reconciliation' });
+
             const allRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId) }).toArray();
 
             await importDataCollection.updateOne(
@@ -834,9 +891,9 @@ async function checkAndProcessImportData(io) {
                   processedAt: new Date(),
                   counts: {
                     total: totalRows,
-                    success: currentSuccess,
-                    failure: currentFailure,
-                    pending: 0
+                    success: finalSuccessCount,
+                    failure: finalFailureCount,
+                    pending: finalPendingReconciliationCount
                   }
                 }
               }
@@ -847,8 +904,8 @@ async function checkAndProcessImportData(io) {
               fileName: fileName,
               summary: {
                 total: totalRows,
-                success: currentSuccess,
-                error: currentFailure
+                success: finalSuccessCount,
+                error: finalFailureCount
               },
               results: allRows.map(row => ({
                 index: row.rowIndex,
@@ -860,7 +917,7 @@ async function checkAndProcessImportData(io) {
               }))
             });
 
-            console.log(`✅ Completed processing ImportData ${importDataId}: ${currentSuccess} success, ${currentFailure} failures out of ${totalRows} total rows`);
+            console.log(`✅ Completed processing ImportData ${importDataId}: ${finalSuccessCount} success, ${finalFailureCount} failures out of ${totalRows} total rows`);
           }
         } catch (error) {
           console.error(`❌ Error processing row ${rowDoc._id}:`, error);
@@ -891,8 +948,376 @@ async function checkAndProcessImportData(io) {
   }
 }
 
+async function reconcileSizePricingLineItems(database, io, importDataId, fileName, trackedLineItemIds = [], trackedShipmentIds = []) {
+  try {
+    console.log('🔄 Starting reconciliation for sizePricing line items...');
+
+    if (trackedLineItemIds.length === 0 || trackedShipmentIds.length === 0) {
+      console.log('✅ No tracked line items or shipments for reconciliation');
+      return;
+    }
+
+    const shipmentsCollection = database.collection('Shipment');
+    const lineItemsCollection = database.collection('lineItem');
+    const importDataRowsCollection = database.collection('ImportDataRows');
+
+    const allTrackedShipments = await shipmentsCollection.find({
+      _id: { $in: trackedShipmentIds.map(id => new ObjectId(id)) }
+    }).toArray();
+
+    if (allTrackedShipments.length === 0) {
+      console.log('✅ No tracked shipments found for reconciliation');
+      return;
+    }
+
+    const shipmentsWithSuspectedProducts = allTrackedShipments.filter(
+      s => Array.isArray(s.suspectedProducts) && s.suspectedProducts.length > 0
+    );
+
+    let reconciledCount = 0;
+
+    const lineItems = await lineItemsCollection.find({
+      _id: { $in: trackedLineItemIds.map(id => new ObjectId(id)) },
+      shipments: { $exists: true, $ne: [] },
+      sizeBreakdown: { $exists: true, $ne: [] }
+    }).toArray();
+
+    for (const lineItem of lineItems) {
+      const lineItemSizeBreakdown = Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : [];
+      if (lineItemSizeBreakdown.length === 0) continue;
+
+      const shipmentsArray = Array.isArray(lineItem.shipments) ? lineItem.shipments : [];
+
+      for (let i = 0; i < shipmentsArray.length; i++) {
+        const shipmentObj = shipmentsArray[i];
+        const shipmentSizeBreakdown = Array.isArray(shipmentObj.sizeBreakdown) ? shipmentObj.sizeBreakdown : [];
+
+        if (shipmentSizeBreakdown.length === 0) continue;
+
+        let matchedShipment = null;
+        let matchedSuspectedProducts = [];
+
+        const matchingShipments = [];
+
+        for (const trackedShipment of allTrackedShipments) {
+          const trackedSuspectedProducts = Array.isArray(trackedShipment.suspectedProducts)
+            ? [...trackedShipment.suspectedProducts]
+            : [];
+
+          if (trackedSuspectedProducts.length === 0) continue;
+
+          let allSizesMatch = true;
+          const tempMatchedSuspected = [];
+          const tempRemainingSuspected = [...trackedSuspectedProducts];
+
+          for (const size of shipmentSizeBreakdown) {
+            if (!size.sizeName) {
+              allSizesMatch = false;
+              break;
+            }
+
+            const lineItemSize = lineItemSizeBreakdown.find(
+              liSize => liSize.sizeName === size.sizeName && liSize.csmSku
+            );
+
+            if (!lineItemSize || !lineItemSize.csmSku) {
+              allSizesMatch = false;
+              break;
+            }
+
+            const sizeCsmSku = lineItemSize.csmSku;
+
+            const matchingIndex = tempRemainingSuspected.findIndex(
+              sp => sp.sizeName === size.sizeName &&
+                sp.sku === sizeCsmSku &&
+                parseInt(sp.quantity || 0) === parseInt(size.quantity || 0)
+            );
+
+            if (matchingIndex === -1) {
+              allSizesMatch = false;
+              break;
+            }
+
+            tempMatchedSuspected.push(tempRemainingSuspected[matchingIndex]);
+            tempRemainingSuspected.splice(matchingIndex, 1);
+          }
+
+          if (allSizesMatch && tempMatchedSuspected.length === shipmentSizeBreakdown.length) {
+            const trackedShipmentShippingMode = trackedShipment.shippingMode || null;
+            const objectShippingMode = shipmentObj.shippingMode || null;
+
+            const modeMatches = !objectShippingMode ||
+              (trackedShipmentShippingMode &&
+                trackedShipmentShippingMode.toLowerCase() === objectShippingMode.toLowerCase());
+
+            if (modeMatches) {
+              matchingShipments.push({
+                shipment: trackedShipment,
+                matchedSuspectedProducts: tempMatchedSuspected
+              });
+            }
+          }
+        }
+
+        if (matchingShipments.length > 0) {
+          if (matchingShipments.length === 1) {
+            matchedShipment = matchingShipments[0].shipment;
+            matchedSuspectedProducts = matchingShipments[0].matchedSuspectedProducts;
+          } else {
+            let earliestDate = null;
+            let selectedMatch = null;
+
+            for (const match of matchingShipments) {
+              const exfactoryDate = match.shipment.exfactoryDate || match.shipment.shipDate;
+              
+              if (exfactoryDate) {
+                const exfactoryDateObj = exfactoryDate instanceof Date ? exfactoryDate : new Date(exfactoryDate);
+                
+                if (!earliestDate || exfactoryDateObj < earliestDate) {
+                  earliestDate = exfactoryDateObj;
+                  selectedMatch = match;
+                }
+              } else if (!selectedMatch) {
+                selectedMatch = match;
+              }
+            }
+
+            if (selectedMatch) {
+              matchedShipment = selectedMatch.shipment;
+              matchedSuspectedProducts = selectedMatch.matchedSuspectedProducts;
+            } else {
+              matchedShipment = matchingShipments[0].shipment;
+              matchedSuspectedProducts = matchingShipments[0].matchedSuspectedProducts;
+            }
+          }
+        }
+
+        if (!matchedShipment) {
+          for (const trackedShipment of allTrackedShipments) {
+            const trackedSuspectedProducts = Array.isArray(trackedShipment.suspectedProducts)
+              ? [...trackedShipment.suspectedProducts]
+              : [];
+
+            if (trackedSuspectedProducts.length === 0) continue;
+
+            let allSizesMatch = true;
+            const tempMatchedSuspected = [];
+            const tempRemainingSuspected = [...trackedSuspectedProducts];
+
+            for (const size of shipmentSizeBreakdown) {
+              if (!size.sizeName) {
+                allSizesMatch = false;
+                break;
+              }
+
+              const lineItemSize = lineItemSizeBreakdown.find(
+                liSize => liSize.sizeName === size.sizeName && liSize.csmSku
+              );
+
+              if (!lineItemSize || !lineItemSize.csmSku) {
+                allSizesMatch = false;
+                break;
+              }
+
+              const sizeCsmSku = lineItemSize.csmSku;
+
+              const matchingIndex = tempRemainingSuspected.findIndex(
+                sp => sp.sizeName === size.sizeName &&
+                  sp.sku === sizeCsmSku &&
+                  parseInt(sp.quantity || 0) === parseInt(size.quantity || 0)
+              );
+
+              if (matchingIndex === -1) {
+                allSizesMatch = false;
+                break;
+              }
+
+              tempMatchedSuspected.push(tempRemainingSuspected[matchingIndex]);
+              tempRemainingSuspected.splice(matchingIndex, 1);
+            }
+
+            if (allSizesMatch && tempMatchedSuspected.length === shipmentSizeBreakdown.length) {
+              const trackedShipmentShippingMode = trackedShipment.shippingMode || null;
+              const objectShippingMode = shipmentObj.shippingMode || null;
+
+              const modeMatches = !objectShippingMode ||
+                (trackedShipmentShippingMode &&
+                  trackedShipmentShippingMode.toLowerCase() === objectShippingMode.toLowerCase());
+
+              if (modeMatches) {
+                matchedShipment = trackedShipment;
+                matchedSuspectedProducts = tempMatchedSuspected;
+                break;
+              }
+            }
+          }
+        }
+
+        if (matchedShipment) {
+          shipmentsArray[i] = {
+            ...shipmentObj,
+            shipmentId: matchedShipment._id.toString(),
+            shipmentName: matchedShipment.shippingNumber || matchedShipment.name || '',
+            shipdate: matchedShipment.shipDate ? (() => {
+              const utcDate = new Date(Date.UTC(
+                matchedShipment.shipDate.getUTCFullYear(),
+                matchedShipment.shipDate.getUTCMonth(),
+                matchedShipment.shipDate.getUTCDate(),
+                0, 0, 0, 0
+              ));
+              return utcDate.toISOString().split('T')[0];
+            })() : null,
+            shippingMode: matchedShipment.shippingMode || shipmentObj.shippingMode || 'Air'
+          };
+
+          const updatePayload = { shipments: shipmentsArray };
+          const updateRes = await updateEntity('lineItem', lineItem._id, updatePayload);
+
+          if (updateRes?.success) {
+            reconciledCount++;
+
+            const matchedShipmentSuspectedProducts = Array.isArray(matchedShipment.suspectedProducts)
+              ? [...matchedShipment.suspectedProducts]
+              : [];
+
+            const updatedSuspectedProducts = matchedShipmentSuspectedProducts.filter(sp => {
+              return !matchedSuspectedProducts.some(msp =>
+                msp.sizeName === sp.sizeName &&
+                msp.sku === sp.sku &&
+                parseInt(msp.quantity || 0) === parseInt(sp.quantity || 0)
+              );
+            });
+
+            const shipmentUpdatePayload = {
+              suspectedProducts: updatedSuspectedProducts
+            };
+
+            await updateEntity('Shipment', matchedShipment._id, shipmentUpdatePayload);
+
+            const updatedShipment = await shipmentsCollection.findOne({ _id: matchedShipment._id });
+            if (updatedShipment) {
+              const shipmentIndex = allTrackedShipments.findIndex(s => s._id.toString() === matchedShipment._id.toString());
+              if (shipmentIndex !== -1) {
+                allTrackedShipments[shipmentIndex] = updatedShipment;
+              }
+            }
+
+            try {
+              await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: lineItem._id }, lineItem._id);
+              await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: matchedShipment._id }, matchedShipment._id);
+            } catch (webhookError) {
+              console.error("Error calling webhook during reconciliation:", webhookError);
+            }
+
+            const relatedCsmSkus = matchedSuspectedProducts.map(msp => msp.sku).filter(Boolean);
+
+            if (relatedCsmSkus.length > 0) {
+              const successRows = await importDataRowsCollection.updateMany(
+                {
+                  importDataId: new ObjectId(importDataId),
+                  'data.SKU': { $in: relatedCsmSkus },
+                  status: 'pending_reconciliation'
+                },
+                {
+                  $set: {
+                    status: 'success',
+                    message: `Successfully reconciled and associated with shipment ${matchedShipment.shippingNumber || matchedShipment.name || matchedShipment._id.toString()}`,
+                    processedAt: new Date()
+                  }
+                }
+              );
+
+              if (successRows.modifiedCount > 0) {
+                const updatedRows = await importDataRowsCollection.find({
+                  importDataId: new ObjectId(importDataId),
+                  'data.SKU': { $in: relatedCsmSkus },
+                  status: 'success'
+                }).toArray();
+
+                for (const row of updatedRows) {
+                  io.emit('importDataProgress', {
+                    importDataId: importDataId,
+                    fileName: fileName,
+                    rowId: row._id.toString(),
+                    status: 'success',
+                    message: row.message
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          const sizeNames = shipmentSizeBreakdown.map(s => s.sizeName).filter(Boolean);
+          const sizeQuantities = shipmentSizeBreakdown.map(s => `${s.sizeName}(${s.quantity || 0})`).join(', ');
+
+          const relatedCsmSkus = lineItemSizeBreakdown
+            .filter(s => sizeNames.includes(s.sizeName))
+            .map(s => s.csmSku)
+            .filter(Boolean);
+
+          if (relatedCsmSkus.length > 0) {
+            const errorRows = await importDataRowsCollection.find({
+              importDataId: new ObjectId(importDataId),
+              'data.SKU': { $in: relatedCsmSkus },
+              status: 'pending_reconciliation'
+            }).toArray();
+
+            for (const errorRow of errorRows) {
+              const existingRow = await importDataRowsCollection.findOne({ _id: errorRow._id });
+
+              if (existingRow?.status === 'success' || existingRow?.status === 'pending_reconciliation') {
+                if (existingRow?.message?.includes('Successfully reconciled') || existingRow?.message?.includes('added to suspectedProducts')) {
+                  continue;
+                }
+              }
+
+              await handleRowError(
+                importDataRowsCollection,
+                errorRow,
+                `No Suspected Products Found: After checking all tracked shipments, no matching suspectedProducts found for sizes ${sizeQuantities}`,
+                io,
+                importDataId,
+                fileName
+              );
+            }
+          }
+        }
+      }
+    }
+
+
+    const remainingPendingRows = await importDataRowsCollection.find({
+      importDataId: new ObjectId(importDataId),
+      status: 'pending_reconciliation'
+    }).toArray();
+
+    if (remainingPendingRows.length > 0) {
+      for (const pendingRow of remainingPendingRows) {
+        const existingRow = await importDataRowsCollection.findOne({ _id: pendingRow._id });
+        
+        if (existingRow?.status === 'pending_reconciliation' && existingRow?.message?.includes('added to suspectedProducts')) {
+          await handleRowError(
+            importDataRowsCollection,
+            pendingRow,
+            'No suspectedProducts found: After reconciliation process completed, no matching suspectedProducts found.',
+            io,
+            importDataId,
+            fileName
+          );
+        }
+      }
+    }
+
+    console.log(`✅ Reconciliation completed: ${reconciledCount} sizePricing line items associated`);
+    
+  } catch (error) {
+    console.error('❌ Error in reconcileSizePricingLineItems:', error);
+  }
+}
+
 module.exports = {
   checkAndProcessImportData,
   processImportDataRow,
+  reconcileSizePricingLineItems,
 };
 
