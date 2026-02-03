@@ -1,15 +1,23 @@
 const { getAggregatedData } = require('../EntityHandler/READ');
 const createEntity = require('../EntityHandler/CREATE');
-const { ObjectId } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const admin = require("firebase-admin");
+require('dotenv').config();
 
-
-const fetchEntityData = async (entityType, objectId) => {
-    const result = await getAggregatedData({
-        entityType,
-        filter: { _id: objectId }
-    });
-    return result?.data?.[0] || null;
+const fetchEntityDataRaw = async (entityType, objectId) => {
+    const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
+    try {
+        await client.connect();
+        const db = client.db(process.env.DB_NAME);
+        const collection = db.collection(entityType);
+        const id = typeof objectId === 'string' && ObjectId.isValid(objectId)
+            ? new ObjectId(objectId)
+            : objectId;
+        const doc = await collection.findOne({ _id: id });
+        return doc || null;
+    } finally {
+        await client.close();
+    }
 };
 
 
@@ -21,8 +29,8 @@ const toRepIdString = (id) => {
 };
 
 const extractRepIds = (entity, recipientsIds) => {
-    if (!entity?.repId) return;
-    const raw = entity.repId;
+    const raw = entity?.repId;
+    if (raw == null) return;
     const ids = Array.isArray(raw) ? raw : [raw];
     for (const id of ids) {
         const sid = toRepIdString(id);
@@ -33,57 +41,52 @@ const extractRepIds = (entity, recipientsIds) => {
 };
 
 const handleRequestType = async (objectId, recipientsIds) => {
-    const requestData = await fetchEntityData("Request", objectId);
+    const requestData = await fetchEntityDataRaw("Request", objectId);
+    if (requestData) {
+        console.log("📋 Request raw repId:", Array.isArray(requestData.repId) ? requestData.repId.length : requestData.repId ? 1 : 0, JSON.stringify(requestData.repId));
+    }
     extractRepIds(requestData, recipientsIds);
 };
 
 
 const handleDesignVersionType = async (objectId, recipientsIds) => {
-    const designVersionData = await fetchEntityData("DesignVersion", objectId);
+    const designVersionData = await fetchEntityDataRaw("DesignVersion", objectId);
     if (!designVersionData?.designId) return;
 
-    const designData = await fetchEntityData("Design", designVersionData.designId);
+    const designData = await fetchEntityDataRaw("Design", designVersionData.designId);
     if (!designData?.requestId) return;
 
-    const requestData = await fetchEntityData("Request", designData.requestId);
+    const requestData = await fetchEntityDataRaw("Request", designData.requestId);
     extractRepIds(requestData, recipientsIds);
 };
 
 
 const handleSampleLineItemType = async (objectId, recipientsIds) => {
-    const lineItemData = await fetchEntityData("lineItem", objectId);
-    console.log("🧪 LineItem data:", lineItemData);
-
+    const lineItemData = await fetchEntityDataRaw("lineItem", objectId);
     if (!lineItemData?.orderId) return;
 
-    const orderData = await fetchEntityData("Order", lineItemData.orderId);
-    console.log("🧪 Order data:", orderData);
-
+    const orderData = await fetchEntityDataRaw("Order", lineItemData.orderId);
     if (orderData?.repId && Array.isArray(orderData.repId) && orderData.repId.length > 0) {
         extractRepIds(orderData, recipientsIds);
         return;
     }
-
     if (orderData?.requestId) {
-        const requestData = await fetchEntityData("Request", orderData.requestId);
-        console.log("🧪 Request data (from Order):", requestData);
+        const requestData = await fetchEntityDataRaw("Request", orderData.requestId);
         extractRepIds(requestData, recipientsIds);
     }
 };
 
 
-
 const handleOrderType = async (objectId, recipientsIds) => {
-    const orderData = await fetchEntityData("Order", objectId);
+    const orderData = await fetchEntityDataRaw("Order", objectId);
     if (!orderData) return;
 
     if (orderData.repId && Array.isArray(orderData.repId) && orderData.repId.length > 0) {
         extractRepIds(orderData, recipientsIds);
         return;
     }
-
     if (orderData.requestId) {
-        const requestData = await fetchEntityData("Request", orderData.requestId);
+        const requestData = await fetchEntityDataRaw("Request", orderData.requestId);
         extractRepIds(requestData, recipientsIds);
     }
 };
@@ -200,6 +203,8 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
 
     if (recipientsIds.length > 0) {
         try {
+            console.log(`📋 repIds collected: ${recipientsIds.length}`, recipientsIds);
+
             const users = await fetchUsersFromRepIds(recipientsIds);
 
             if (users.length === 0) {
@@ -212,6 +217,10 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
                 read: false
             }));
 
+            if (receivers.length !== recipientsIds.length) {
+                console.warn(`⚠️ receivers count (${receivers.length}) differs from repIds count (${recipientsIds.length}) - some users may not exist in DB`);
+            }
+
             const deeplink = getDeeplink(objectType, objectId);
 
             const notificationData = {
@@ -219,7 +228,7 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
                 body: `You have received a new message in ${objectType} from the client. Please check for updates.`,
                 deeplink: deeplink,
                 sender: null,
-                receivers: receivers,
+                receivers: [...receivers],
                 data: {}
             };
 
