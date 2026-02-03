@@ -3,6 +3,7 @@ const authenticateToken = require("../utils/auth/token");
 const createEntity = require("../EntityHandler/CREATE");
 const { ObjectId, MongoClient } = require("mongodb");
 const { getUserRole } = require("../utils/getuserRole");
+const sendNotificationtoreps = require("../utils/sendRepsnotification");
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
   }
 
   const targetRoles = Array.isArray(targetRole) ? targetRole : [targetRole];
-  
+
   if (!targetRole) {
     visibleToRoles.push("Admin");
   }
@@ -47,7 +48,9 @@ router.post("/Message", async (req, res) => {
         .json({ success: false, message: "Invalid sender" });
     }
 
-    console.log("👤 Sender role:", senderRole);
+    sendNotificationtoreps(senderRole, req.body.objectType, req.body.object, req.io).catch((err) => {
+      console.error("sendNotificationtoreps error:", err);
+    });
 
     const visibleToRoles = calculateVisibleToRoles(
       senderRole,
@@ -72,11 +75,9 @@ router.post("/Message", async (req, res) => {
     if (result.success) {
       console.log("✅ Message saved to DB:", result.data?._id);
 
-      // Prepare room name
       const roomName = `${req.body.objectType}-${req.body.object}`;
       console.log("🏠 Emitting to room:", roomName);
 
-      // Get all sockets in the room
       const socketsInRoom = await req.io.in(roomName).fetchSockets();
       console.log(
         `📡 Found ${socketsInRoom.length} sockets in room ${roomName}`
@@ -100,7 +101,6 @@ router.post("/Message", async (req, res) => {
         JSON.stringify(messageToEmit, null, 2)
       );
 
-      // Emit to all eligible sockets
       let emittedCount = 0;
       socketsInRoom.forEach((socket) => {
         console.log(`🔍 Checking socket ${socket.id}:`);
@@ -110,9 +110,6 @@ router.post("/Message", async (req, res) => {
         console.log(`   - Object ID: ${socket.objectId}`);
 
         if (socket.userRole && visibleToRoles.includes(socket.userRole)) {
-          console.log(
-            `✅ Emitting to socket ${socket.id} (${socket.userRole})`
-          );
           socket.emit("newMessage", messageToEmit);
           emittedCount++;
         } else {
@@ -123,9 +120,6 @@ router.post("/Message", async (req, res) => {
         }
       });
 
-      console.log(
-        `📊 Emitted message to ${emittedCount} out of ${socketsInRoom.length} sockets`
-      );
 
       return res.status(201).json(result);
     } else {

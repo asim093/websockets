@@ -1,0 +1,235 @@
+const { getAggregatedData } = require('../EntityHandler/READ');
+const createEntity = require('../EntityHandler/CREATE');
+const { ObjectId } = require('mongodb');
+const admin = require("firebase-admin");
+
+
+const fetchEntityData = async (entityType, objectId) => {
+    const result = await getAggregatedData({
+        entityType,
+        filter: { _id: objectId }
+    });
+    return result?.data?.[0] || null;
+};
+
+
+const extractRepIds = (entity, recipientsIds) => {
+    if (entity?.repId && Array.isArray(entity.repId) && entity.repId.length > 0) {
+        recipientsIds.push(...entity.repId);
+    }
+};
+
+
+const handleRequestType = async (objectId, recipientsIds) => {
+    const requestData = await fetchEntityData("Request", objectId);
+    extractRepIds(requestData, recipientsIds);
+};
+
+
+const handleDesignVersionType = async (objectId, recipientsIds) => {
+    const designVersionData = await fetchEntityData("DesignVersion", objectId);
+    if (!designVersionData?.designId) return;
+
+    const designData = await fetchEntityData("Design", designVersionData.designId);
+    if (!designData?.requestId) return;
+
+    const requestData = await fetchEntityData("Request", designData.requestId);
+    extractRepIds(requestData, recipientsIds);
+};
+
+
+const handleSampleLineItemType = async (objectId, recipientsIds) => {
+    const lineItemData = await fetchEntityData("lineItem", objectId);
+    console.log("🧪 LineItem data:", lineItemData);
+
+    if (!lineItemData?.orderId) return;
+
+    const orderData = await fetchEntityData("Order", lineItemData.orderId);
+    console.log("🧪 Order data:", orderData);
+
+    if (orderData?.repId && Array.isArray(orderData.repId) && orderData.repId.length > 0) {
+        extractRepIds(orderData, recipientsIds);
+        return;
+    }
+
+    if (orderData?.requestId) {
+        const requestData = await fetchEntityData("Request", orderData.requestId);
+        console.log("🧪 Request data (from Order):", requestData);
+        extractRepIds(requestData, recipientsIds);
+    }
+};
+
+
+
+const handleOrderType = async (objectId, recipientsIds) => {
+    const orderData = await fetchEntityData("Order", objectId);
+    if (!orderData) return;
+
+    if (orderData.repId && Array.isArray(orderData.repId) && orderData.repId.length > 0) {
+        extractRepIds(orderData, recipientsIds);
+        return;
+    }
+
+    if (orderData.requestId) {
+        const requestData = await fetchEntityData("Request", orderData.requestId);
+        extractRepIds(requestData, recipientsIds);
+    }
+};
+
+
+const getDeeplink = (objectType, objectId) => {
+    const baseUrl = "https://csm-be.web.app";
+    const deeplinkMap = {
+        "Request": `${baseUrl}/ViewRequest/${objectId}`,
+        "DesignVersion": `${baseUrl}/Viewdesign/${objectId}`,
+        "SampleLineItem": `${baseUrl}/SampleDetail/${objectId}`,
+    };
+    return deeplinkMap[objectType] || `${baseUrl}`;
+};
+
+const fetchUsersFromRepIds = async (repIds) => {
+    if (!repIds || repIds.length === 0) {
+        return [];
+    }
+
+    try {
+        const result = await getAggregatedData({
+            entityType: "User",
+            filter: {
+                _id: { $in: repIds.map(id => new ObjectId(id)) }
+            }
+        });
+        console.log("Users fetched from repIds:", result);
+        return result?.data || [];
+    } catch (error) {
+        console.error("Error fetching users from repIds:", error);
+        return [];
+    }
+};
+
+const sendFirebaseNotification = async (token, notification) => {
+    if (!token) return false;
+    
+    try {
+        if (!admin.apps.length) {
+            const path = require('path');
+            const firebaseConfigPath = path.join(__dirname, '../../csm-be-latest/api/sendar/csm-be-firebase-adminsdk-fbsvc-62b8bff808.json');
+            
+            try {
+                const firebaseConfig = require(firebaseConfigPath);
+                admin.initializeApp({
+                    credential: admin.credential.cert(firebaseConfig),
+                });
+            } catch (initError) {
+                console.error("Firebase initialization error:", initError);
+                return false;
+            }
+        }
+
+        const message = {
+            notification: { 
+                title: notification.title, 
+                body: notification.body 
+            },
+            token: token,
+        };
+
+        const response = await admin.messaging().send(message);
+        console.log("✅ Firebase notification sent successfully:", response);
+        return true;
+    } catch (error) {
+        if (error.code === "messaging/message-rate-exceeded") {
+            console.error("Rate limit exceeded for token:", token);
+        } else if (error.code === "messaging/invalid-registration-token" || error.code === "messaging/registration-token-not-registered") {
+            console.error("Invalid or unregistered token:", token);
+        } else {
+            console.error("Error sending Firebase notification:", error);
+        }
+        return false;
+    }
+};
+
+const sendNotificationtoreps = async (senderRole, objectType, objectId, io = null) => {
+    const recipientsIds = [];
+
+    if (senderRole !== "Client" || !objectType || !objectId) {
+        return recipientsIds;
+    }
+
+    const handlers = {
+        "Request": handleRequestType,
+        "DesignVersion": handleDesignVersionType,
+        "SampleLineItem": handleSampleLineItemType,
+        "Order": handleOrderType
+    };
+
+    const handler = handlers[objectType];
+    if (handler) {
+        await handler(objectId, recipientsIds);
+    }
+
+    if (recipientsIds.length > 0) {
+        try {
+            const users = await fetchUsersFromRepIds(recipientsIds);
+
+            if (users.length === 0) {
+                console.log("No users found for repIds:", recipientsIds);
+                return recipientsIds;
+            }
+
+            const receivers = users.map(user => ({
+                userId: new ObjectId(user._id),
+                read: false
+            }));
+
+            const deeplink = getDeeplink(objectType, objectId);
+
+            const notificationData = {
+                title: "New Message from Client",
+                body: `You have received a new message in ${objectType} from the client. Please check for updates.`,
+                deeplink: deeplink,
+                sender: null,
+                receivers: receivers,
+                data: {}
+            };
+
+            const createdNotification = await createEntity("Notification", notificationData);
+            console.log(`✅ Notification created for ${receivers.length} receivers - ObjectType: ${objectType}, ObjectId: ${objectId}`);
+
+            const pushPromises = users.map(async (user) => {
+                if (user.token) {
+                    await sendFirebaseNotification(user.token, notificationData);
+                }
+            });
+            await Promise.allSettled(pushPromises);
+
+            if (io) {
+                const notificationToEmit = {
+                    ...notificationData,
+                    _id: createdNotification.id || createdNotification._id,
+                    createdAt: new Date().toISOString(),
+                    receivers: receivers.map(receiver => ({
+                        userId: receiver.userId.toString(),
+                        read: receiver.read
+                    }))
+                };
+                
+                receivers.forEach((receiver) => {
+                    const userId = receiver.userId.toString();
+                    io.to(`user-${userId}`).emit("newNotification", notificationToEmit);
+                });
+                
+                console.log(`📡 Websocket notification emitted to ${receivers.length} users`);
+            }
+
+            return recipientsIds;
+        } catch (error) {
+            console.error("Error creating notification:", error);
+            return recipientsIds;
+        }
+    }
+
+    return recipientsIds;
+};
+
+module.exports = sendNotificationtoreps;

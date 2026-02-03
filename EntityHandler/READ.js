@@ -95,23 +95,17 @@ async function getAggregatedData(request) {
   if ($unwind) pipeline.push($unwind);
 
   if ($project) {
-    console.log("Project within Request:", $project);
     pipeline.push($project);
   } else {
-    console.log(
-      "No project within Request, looking for defaultProject from schema:",
-      schema?.defaultProject
-    );
+
     if (schema && "defaultProject" in schema) {
       pipeline.push({ $project: schema.defaultProject });
-      console.log("Default project:", schema.defaultProject);
     }
   }
 
   pipeline.push({ $skip: (pagination.page - 1) * pagination.pageSize });
   pipeline.push({ $limit: pagination.pageSize });
 
-  console.log("pipeline", pipeline);
 
   try {
     await client.connect();
@@ -151,8 +145,6 @@ async function runQuery(entityType, id, query, filters = false) {
         query.splice(unwindIndex + 1, 0, filters);
       }
     }
-
-    console.log("query sent to MongoDB:", JSON.stringify(query, null, 2));
 
     await client.connect();
     const database = client.db(process.env.DB_NAME);

@@ -14,12 +14,6 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3005;
 
-console.log("🔍 Environment check:");
-console.log(
-  "MONGODB_CONNECTION_STRING:",
-  process.env.MONGODB_CONNECTION_STRING ? "EXISTS" : "MISSING"
-);
-console.log("DB_NAME:", process.env.DB_NAME ? "EXISTS" : "MISSING");
 
 const io = new Server(server, {
   cors: {
@@ -60,13 +54,11 @@ io.on("connection", (socket) => {
       socket.objectType = objectType;
       socket.objectId = objectId;
 
-      console.log(`✅ Socket ${socket.id} joined room ${room} as ${userRole}`);
+      // Join user-specific room for notifications
+      const userRoom = `user-${userId}`;
+      socket.join(userRoom);
 
-      socket.emit("joined", {
-        room,
-        userRole,
-        message: `Successfully joined room ${room} as ${userRole}`,
-      });
+      console.log(`✅ Socket ${socket.id} joined room ${room} as ${userRole} and user room ${userRoom}`);
     } catch (error) {
       console.error("❌ Error in socket join:", error);
       socket.emit("error", { message: "Failed to join room" });
@@ -83,18 +75,11 @@ io.on("connection", (socket) => {
 
     const room = `${messageData.objectType}-${messageData.object}`;
     const targetRole = messageData.targetRole;
-    const targetRoles = messageData.targetRoles; // NEW: Handle array
-    const visibleToRoles = messageData.visibleToRoles; // NEW: Handle visibility array
-
-    console.log(`🎯 Target Role: ${targetRole}`);
-    console.log(`🎯 Target Roles Array: ${JSON.stringify(targetRoles)}`);
-    console.log(`👀 Visible To Roles: ${JSON.stringify(visibleToRoles)}`);
-
+    const targetRoles = messageData.targetRoles;
+    const visibleToRoles = messageData.visibleToRoles;
     if (targetRole === "All") {
       socket.to(room).emit("newMessage", messageData);
-      console.log(`📡 Message sent to ALL users in room ${room}`);
     } else if (targetRole === "Internal") {
-      console.log(`🔒 Internal message - not broadcasting to other users`);
     } else {
       const roomSockets = io.sockets.adapter.rooms.get(room);
 
@@ -106,19 +91,15 @@ io.on("connection", (socket) => {
           if (targetSocket && targetSocket.id !== socket.id) {
             let shouldSendMessage = false;
 
-            // NEW: Use visibleToRoles array if available
             if (visibleToRoles && Array.isArray(visibleToRoles)) {
               shouldSendMessage = visibleToRoles.includes(
                 targetSocket.userRole
               );
             }
-            // NEW: Use targetRoles array if available
             else if (targetRoles && Array.isArray(targetRoles)) {
               shouldSendMessage = targetRoles.includes(targetSocket.userRole);
             }
-            // FIXED: Old logic with correct method name
             else if (targetRole && targetSocket.userRole) {
-              // FIXED: Changed from .include() to .includes() - this was the typo!
               shouldSendMessage =
                 targetSocket.userRole.includes(targetRole) ||
                 targetSocket.userRole === targetRole;
@@ -184,20 +165,20 @@ server.listen(PORT, () => {
   console.log(`📡 Socket.IO server is ready for connections`);
 
 
-  checkAndProcessImportData(io).catch((error) => {
-    console.error('❌ Error in initial ImportData processing:', error);
-  });
+  // checkAndProcessImportData(io).catch((error) => {
+  //   console.error('❌ Error in initial ImportData processing:', error);
+  // });
 
-  cron.schedule("*/2 * * * *", async () => {
-    console.log("⏰ Running ImportData processing cron job...");
-    try {
-      await checkAndProcessImportData(io);
-    } catch (error) {
-      console.error('❌ Error in cron job execution:', error);
-    }
-  });
+  // cron.schedule("*/2 * * * *", async () => {
+  //   console.log("⏰ Running ImportData processing cron job...");
+  //   try {
+  //     await checkAndProcessImportData(io);
+  //   } catch (error) {
+  //     console.error('❌ Error in cron job execution:', error);
+  //   }
+  // });
 
-  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
+  // console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
 });
 
 module.exports = app;
