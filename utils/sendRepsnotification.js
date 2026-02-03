@@ -13,12 +13,24 @@ const fetchEntityData = async (entityType, objectId) => {
 };
 
 
-const extractRepIds = (entity, recipientsIds) => {
-    if (entity?.repId && Array.isArray(entity.repId) && entity.repId.length > 0) {
-        recipientsIds.push(...entity.repId);
-    }
+const toRepIdString = (id) => {
+    if (id == null) return null;
+    if (typeof id === 'string') return id;
+    if (id && typeof id === 'object' && id.toString) return id.toString();
+    return String(id);
 };
 
+const extractRepIds = (entity, recipientsIds) => {
+    if (!entity?.repId) return;
+    const raw = entity.repId;
+    const ids = Array.isArray(raw) ? raw : [raw];
+    for (const id of ids) {
+        const sid = toRepIdString(id);
+        if (sid && !recipientsIds.includes(sid)) {
+            recipientsIds.push(sid);
+        }
+    }
+};
 
 const handleRequestType = async (objectId, recipientsIds) => {
     const requestData = await fetchEntityData("Request", objectId);
@@ -92,15 +104,33 @@ const fetchUsersFromRepIds = async (repIds) => {
         return [];
     }
 
+    const uniqueIds = [...new Set(repIds.map(id => toRepIdString(id)).filter(Boolean))];
+    const objectIds = [];
+    for (const id of uniqueIds) {
+        try {
+            if (ObjectId.isValid(id)) {
+                objectIds.push(new ObjectId(id));
+            }
+        } catch (e) {
+            console.warn("Invalid repId skipped:", id, e.message);
+        }
+    }
+
+    if (objectIds.length === 0) {
+        return [];
+    }
+
     try {
         const result = await getAggregatedData({
             entityType: "User",
             filter: {
-                _id: { $in: repIds.map(id => new ObjectId(id)) }
-            }
+                _id: { $in: objectIds }
+            },
+            pagination: { page: 1, pageSize: Math.max(objectIds.length, 500) }
         });
-        console.log("Users fetched from repIds:", result);
-        return result?.data || [];
+        const users = result?.data || [];
+        console.log("Users fetched from repIds:", uniqueIds.length, "ids ->", users.length, "users");
+        return users;
     } catch (error) {
         console.error("Error fetching users from repIds:", error);
         return [];
