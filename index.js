@@ -54,7 +54,6 @@ io.on("connection", (socket) => {
       socket.objectType = objectType;
       socket.objectId = objectId;
 
-      // Join user-specific room for notifications
       const userRoom = `user-${userId}`;
       socket.join(userRoom);
 
@@ -165,20 +164,20 @@ server.listen(PORT, () => {
   console.log(`📡 Socket.IO server is ready for connections`);
 
 
-  // checkAndProcessImportData(io).catch((error) => {
-  //   console.error('❌ Error in initial ImportData processing:', error);
-  // });
+  checkAndProcessImportData(io).catch((error) => {
+    console.error('❌ Error in initial ImportData processing:', error);
+  });
 
-  // cron.schedule("*/2 * * * *", async () => {
-  //   console.log("⏰ Running ImportData processing cron job...");
-  //   try {
-  //     await checkAndProcessImportData(io);
-  //   } catch (error) {
-  //     console.error('❌ Error in cron job execution:', error);
-  //   }
-  // });
+  cron.schedule("*/2 * * * *", async () => {
+    console.log("⏰ Running ImportData processing cron job...");
+    try {
+      await checkAndProcessImportData(io);
+    } catch (error) {
+      console.error('❌ Error in cron job execution:', error);
+    }
+  });
 
-  // console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
+  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
 });
 
 module.exports = app;
