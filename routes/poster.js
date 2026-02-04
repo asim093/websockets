@@ -1,7 +1,6 @@
 const express = require("express");
-const authenticateToken = require("../utils/auth/token");
 const createEntity = require("../EntityHandler/CREATE");
-const { ObjectId, MongoClient } = require("mongodb");
+const { ObjectId} = require("mongodb");
 const { getUserRole } = require("../utils/getuserRole");
 const sendNotificationtoreps = require("../utils/sendRepsnotification");
 
@@ -39,7 +38,6 @@ const calculateVisibleToRoles = (senderRole, targetRole) => {
 
 router.post("/Message", async (req, res) => {
   try {
-    console.log("📨 Incoming message request:", req.body);
 
     const senderRole = await getUserRole(req.body.sender);
     if (!senderRole) {
@@ -56,7 +54,6 @@ router.post("/Message", async (req, res) => {
       senderRole,
       req.body.targetRole
     );
-    console.log("👥 Visible to roles:", visibleToRoles);
 
     const payload = {
       ...req.body,
@@ -70,24 +67,15 @@ router.post("/Message", async (req, res) => {
     };
 
     const result = await createEntity("Message", payload);
-    console.log("Database result:", result);
 
     if (result.success) {
-      console.log("✅ Message saved to DB:", result.data?._id);
 
       const roomName = `${req.body.objectType}-${req.body.object}`;
-      console.log("🏠 Emitting to room:", roomName);
 
       const socketsInRoom = await req.io.in(roomName).fetchSockets();
-      console.log(
-        `📡 Found ${socketsInRoom.length} sockets in room ${roomName}`
-      );
+   
 
-      if (socketsInRoom.length === 0) {
-        console.log(
-          "⚠️ No sockets found in room. Check room name and socket connections."
-        );
-      }
+      
 
       const messageToEmit = {
         ...payload,
@@ -96,19 +84,10 @@ router.post("/Message", async (req, res) => {
         tempId: req.body.tempId,
       };
 
-      console.log(
-        "📤 Message to emit:",
-        JSON.stringify(messageToEmit, null, 2)
-      );
+     
 
       let emittedCount = 0;
       socketsInRoom.forEach((socket) => {
-        console.log(`🔍 Checking socket ${socket.id}:`);
-        console.log(`   - User ID: ${socket.userId}`);
-        console.log(`   - User Role: ${socket.userRole}`);
-        console.log(`   - Object Type: ${socket.objectType}`);
-        console.log(`   - Object ID: ${socket.objectId}`);
-
         if (socket.userRole && visibleToRoles.includes(socket.userRole)) {
           socket.emit("newMessage", messageToEmit);
           emittedCount++;
