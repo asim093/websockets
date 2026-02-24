@@ -23,13 +23,11 @@ const fetchEntityDataRaw = async (entityType, objectId) => {
 
 
 const fetchTemplateByName = async (templateName) => {
+    const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
     try {
-        const result = await getAggregatedData({
-            entityType: "Notificationtemplates",
-            filter: { name: templateName, isActive: true },
-            pagination: { page: 1, pageSize: 1 }
-        });
-        const template = result?.data?.[0] || null;
+        await client.connect();
+        const db = client.db(process.env.DB_NAME);
+        const template = await db.collection("Notificationtemplates").findOne({ name: templateName, isActive: true });
         if (template) {
             console.log(`📄 Template found: "${templateName}"`);
         } else {
@@ -39,6 +37,8 @@ const fetchTemplateByName = async (templateName) => {
     } catch (error) {
         console.error(`Error fetching template "${templateName}":`, error);
         return null;
+    } finally {
+        await client.close();
     }
 };
 
