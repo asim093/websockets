@@ -84,7 +84,7 @@ router.put("/Message/:id/visibility", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("💥 Error updating message visibility:", error);
+    console.error(" Error updating message visibility:", error);
     return res.status(500).json({
       success: false,
       message: error.message
@@ -133,7 +133,7 @@ router.put("/Message/:id/read", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("💥 Error updating message read status:", error);
+    console.error(" Error updating message read status:", error);
     return res.status(500).json({
       success: false,
       message: "Internal server error"
@@ -187,7 +187,7 @@ router.put("/Message/:id", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("💥 Error updating message:", error);
+    console.error(" Error updating message:", error);
     return res.status(500).json({ 
       success: false, 
       message: error.message 
@@ -195,7 +195,6 @@ router.put("/Message/:id", async (req, res) => {
   }
 });
 
-// Generic routes come LAST
 router.put('/', authenticateToken, async (req, res) => {
   console.log("🎯 GENERIC ROOT PUT ROUTE HIT");
   const result = await updateEntity(req.body.type, req.body.id, req.body.data, req.body?.action);
@@ -209,7 +208,6 @@ router.put('/:type/:id', authenticateToken, async (req, res) => {
   res.json(result);
 });
 
-// Add a test route to verify the router is working
 router.get("/test-putter", (req, res) => {
   res.json({ 
     message: "Putter router is working!",
