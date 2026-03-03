@@ -606,7 +606,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       }
 
       if (shipmentsArray.length > existingShipments.length) {
-        console.error(`❌ ERROR: shipmentsArray length increased from ${existingShipments.length} to ${shipmentsArray.length}. New objects should never be created!`);
+        console.error(` ERROR: shipmentsArray length increased from ${existingShipments.length} to ${shipmentsArray.length}. New objects should never be created!`);
         throw new Error(`Invalid state: shipmentsArray length increased. This should never happen. Original: ${existingShipments.length}, New: ${shipmentsArray.length}`);
       }
 
@@ -711,7 +711,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     return { trackingData };
 
   } catch (error) {
-    console.error(`❌ Error processing row ${rowDoc._id}:`, error);
+    console.error(` Error processing row ${rowDoc._id}:`, error);
 
     const existingRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
 
@@ -821,7 +821,7 @@ async function checkAndProcessImportData(io) {
       const importDataDoc = await importDataCollection.findOne({ _id: new ObjectId(importDataId) });
 
       if (!importDataDoc) {
-        console.error(`❌ ImportData document not found for ID: ${importDataId}`);
+        console.error(` ImportData document not found for ID: ${importDataId}`);
         for (const rowDoc of rows) {
           await handleRowError(importDataRowsCollection, rowDoc, 'ImportData document not found', io, importDataId.toString(), '');
         }
@@ -917,10 +917,10 @@ async function checkAndProcessImportData(io) {
               }))
             });
 
-            console.log(`✅ Completed processing ImportData ${importDataId}: ${finalSuccessCount} success, ${finalFailureCount} failures out of ${totalRows} total rows`);
+            console.log(` Completed processing ImportData ${importDataId}: ${finalSuccessCount} success, ${finalFailureCount} failures out of ${totalRows} total rows`);
           }
         } catch (error) {
-          console.error(`❌ Error processing row ${rowDoc._id}:`, error);
+          console.error(` Error processing row ${rowDoc._id}:`, error);
 
           await handleRowError(importDataRowsCollection, rowDoc, error.message, io, importDataId.toString(), fileName);
 
@@ -937,12 +937,12 @@ async function checkAndProcessImportData(io) {
     }
 
   } catch (error) {
-    console.error('❌ Error in checkAndProcessImportData:', error);
+    console.error(' Error in checkAndProcessImportData:', error);
   } finally {
     try {
       await dbClient.close();
     } catch (closeError) {
-      console.error('❌ Error closing database connection:', closeError);
+      console.error(' Error closing database connection:', closeError);
     }
     isProcessing = false;
   }
@@ -953,7 +953,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
     console.log('🔄 Starting reconciliation for sizePricing line items...');
 
     if (trackedLineItemIds.length === 0 || trackedShipmentIds.length === 0) {
-      console.log('✅ No tracked line items or shipments for reconciliation');
+      console.log(' No tracked line items or shipments for reconciliation');
       return;
     }
 
@@ -966,7 +966,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
     }).toArray();
 
     if (allTrackedShipments.length === 0) {
-      console.log('✅ No tracked shipments found for reconciliation');
+      console.log(' No tracked shipments found for reconciliation');
       return;
     }
 
@@ -1308,10 +1308,10 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
       }
     }
 
-    console.log(`✅ Reconciliation completed: ${reconciledCount} sizePricing line items associated`);
+    console.log(` Reconciliation completed: ${reconciledCount} sizePricing line items associated`);
     
   } catch (error) {
-    console.error('❌ Error in reconcileSizePricingLineItems:', error);
+    console.error(' Error in reconcileSizePricingLineItems:', error);
   }
 }
 

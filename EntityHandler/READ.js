@@ -26,7 +26,7 @@ async function getAggregatedData(request) {
       let value = filter[field];
       let isCustomField = false;
 
-      // ✅ Check custom field
+      //  Check custom field
       if (schema?.customFields && schema?.customFields[field]) {
         isCustomField = true;
       }

@@ -70,7 +70,7 @@ router.put("/Message/:id/visibility", async (req, res) => {
         console.log("🔄 Broadcasting visibility change to room:", roomName);
       }
 
-      console.log("✅ Message visibility updated successfully");
+      console.log(" Message visibility updated successfully");
       return res.status(200).json({
         success: true,
         message: "Visibility updated successfully",
@@ -175,7 +175,7 @@ router.put("/Message/:id", async (req, res) => {
     await client.close();
     
     if (updateResult.modifiedCount === 1) {
-      console.log("✅ Message updated successfully");
+      console.log(" Message updated successfully");
       return res.status(200).json({ 
         success: true, 
         message: "Message updated successfully"

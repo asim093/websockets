@@ -30,7 +30,7 @@ router.delete("/Message/:id", async (req, res) => {
       const deleteResult = await collection.deleteOne({ _id: new ObjectId(messageId) });
 
       if (deleteResult.deletedCount === 1) {
-        console.log("✅ Message deleted successfully");
+        console.log(" Message deleted successfully");
         
         // Broadcast deletion to socket room if needed
         if (req.io && messageToDelete) {

@@ -80,7 +80,7 @@ router.get('/PinnedMessage/object/:id', authenticateToken, async (req, res) => {
     console.log("userCreatedAt" ,userCreatedAt)
     const data = await getMessages(id, true, null, userRole, userCreatedAt);
     
-    console.log(`✅ Found ${data.data?.length || 0} pinned messages for user created at: ${userCreatedAt}`);
+    console.log(` Found ${data.data?.length || 0} pinned messages for user created at: ${userCreatedAt}`);
     res.json(data);
   } catch (error) {
     console.log("/PinnedMessage/object/:id encountered an error: ", error);
@@ -103,7 +103,7 @@ router.get("/Message/object/:objectid/:id?", authenticateToken, async (req, res)
       data = await getMessages(objectid, false, null, userRole, userCreatedAt);
     }
 
-    console.log(`✅ Found ${data.data?.length || 0} messages visible to ${userRole} (created after user: ${userCreatedAt})`);
+    console.log(` Found ${data.data?.length || 0} messages visible to ${userRole} (created after user: ${userCreatedAt})`);
     res.json(data);
   } catch (error) {
     console.error("/Message/object/:objectid/:id error:", error);

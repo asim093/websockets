@@ -75,7 +75,7 @@ async function callMakeWebhook(entityType, operation, data, responseData = null,
       }
     });
 
-    console.log(`✅ Webhook sent successfully for ${operation} ${entityType}${finalEntityId ? ` (ID: ${finalEntityId})` : ''}`);
+    console.log(` Webhook sent successfully for ${operation} ${entityType}${finalEntityId ? ` (ID: ${finalEntityId})` : ''}`);
 
     try {
       await saveWebhookLog('INFO', 'WEBHOOK', operation, entityType, finalEntityId, `Webhook API Response for ${operation} ${entityType}`, {

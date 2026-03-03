@@ -29,7 +29,7 @@ const fetchTemplateByName = async (templateName) => {
         const db = client.db(process.env.DB_NAME);
         const template = await db.collection("Notificationtemplates").findOne({ name: templateName, isActive: true });
         if (template) {
-            console.log(`📄 Template found: "${templateName}"`);
+            console.log(` Template found: "${templateName}"`);
         } else {
             console.warn(`⚠️  Template not found or inactive: "${templateName}"`);
         }
@@ -234,7 +234,7 @@ const sendFirebaseNotification = async (token, notification) => {
             notification: { title: notification.title, body: notification.body },
             token,
         });
-        console.log("✅ Firebase push sent:", response);
+        console.log(" Firebase push sent:", response);
         return true;
     } catch (error) {
         if (error.code === "messaging/message-rate-exceeded") {
@@ -329,7 +329,7 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
         };
 
         const createdNotification = await createEntity("Notification", notificationData);
-        console.log(`✅ Notification saved — ${receivers.length} receivers, type: ${objectType}, id: ${objectId}`);
+        console.log(` Notification saved — ${receivers.length} receivers, type: ${objectType}, id: ${objectId}`);
 
         const pushPromises = users.map(async (user) => {
             if (user.token) {

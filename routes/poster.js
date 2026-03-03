@@ -93,7 +93,7 @@ router.post("/Message", async (req, res) => {
           emittedCount++;
         } else {
           console.log(
-            `❌ Socket ${socket.id} role ${socket.userRole} not in visibleToRoles:`,
+            ` Socket ${socket.id} role ${socket.userRole} not in visibleToRoles:`,
             visibleToRoles
           );
         }
@@ -102,7 +102,7 @@ router.post("/Message", async (req, res) => {
 
       return res.status(201).json(result);
     } else {
-      console.error("❌ Failed to save message:", result);
+      console.error(" Failed to save message:", result);
       return res.status(400).json(result);
     }
   } catch (error) {

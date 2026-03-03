@@ -45,7 +45,7 @@ io.on("connection", (socket) => {
           userRole = "Client";
         }
       } catch (roleError) {
-        console.error("❌ Error getting user role:", roleError.message);
+        console.error(" Error getting user role:", roleError.message);
         userRole = "Client";
       }
 
@@ -57,9 +57,9 @@ io.on("connection", (socket) => {
       const userRoom = `user-${userId}`;
       socket.join(userRoom);
 
-      console.log(`✅ Socket ${socket.id} joined room ${room} as ${userRole} and user room ${userRoom}`);
+      console.log(` Socket ${socket.id} joined room ${room} as ${userRole} and user room ${userRoom}`);
     } catch (error) {
-      console.error("❌ Error in socket join:", error);
+      console.error(" Error in socket join:", error);
       socket.emit("error", { message: "Failed to join room" });
     }
   });
@@ -68,7 +68,7 @@ io.on("connection", (socket) => {
     console.log("📩 Received sendMessage:", messageData);
 
     if (!messageData || !messageData.objectType || !messageData.object) {
-      console.error("❌ Invalid message data:", messageData);
+      console.error(" Invalid message data:", messageData);
       return;
     }
 
@@ -131,7 +131,7 @@ io.on("connection", (socket) => {
     console.log("🔄 Received visibility change:", data);
 
     if (!data || !data.objectType || !data.object) {
-      console.error("❌ Invalid visibility change data:", data);
+      console.error(" Invalid visibility change data:", data);
       return;
     }
 
@@ -145,7 +145,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("error", (error) => {
-    console.error("❌ Socket error:", error);
+    console.error(" Socket error:", error);
   });
 });
 
@@ -165,7 +165,7 @@ server.listen(PORT, () => {
 
 
   checkAndProcessImportData(io).catch((error) => {
-    console.error('❌ Error in initial ImportData processing:', error);
+    console.error(' Error in initial ImportData processing:', error);
   });
 
   cron.schedule("*/2 * * * *", async () => {
@@ -173,7 +173,7 @@ server.listen(PORT, () => {
     try {
       await checkAndProcessImportData(io);
     } catch (error) {
-      console.error('❌ Error in cron job execution:', error);
+      console.error(' Error in cron job execution:', error);
     }
   });
 
