@@ -795,7 +795,58 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
     return {};
   }
 
-  // Validate required fields based on schema.requiredFields
+  try {
+    const arrayFields = {
+      ...(schemaDoc.basicFields || {}),
+      ...(schemaDoc.customFields || {})
+    };
+    for (const [fieldKey, expectedType] of Object.entries(arrayFields)) {
+      if (expectedType !== 'array') continue;
+      const currentVal = mappedPayload[fieldKey];
+      if (typeof currentVal === 'string') {
+        const trimmed = currentVal.trim();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) {
+              mappedPayload[fieldKey] = parsed;
+            } else {
+              await handleRowError(
+                importDataRowsCollection,
+                rowDoc,
+                `Field ${fieldKey} should be an array, but parsed JSON is ${typeof parsed}`,
+                io,
+                importDataId,
+                fileName
+              );
+              return {};
+            }
+          } catch (e) {
+            await handleRowError(
+              importDataRowsCollection,
+              rowDoc,
+              `Field ${fieldKey} contains invalid JSON array: ${e.message}`,
+              io,
+              importDataId,
+              fileName
+            );
+            return {};
+          }
+        }
+      }
+    }
+  } catch (e) {
+    await handleRowError(
+      importDataRowsCollection,
+      rowDoc,
+      `Failed to normalize array fields: ${e.message}`,
+      io,
+      importDataId,
+      fileName
+    );
+    return {};
+  }
+
   const requiredFields = Array.isArray(schemaDoc.requiredFields) ? schemaDoc.requiredFields : [];
   for (const fieldPath of requiredFields) {
     const value = mappedPayload[fieldPath];
