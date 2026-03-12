@@ -749,15 +749,221 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
   return { trackingData };
 }
 
-let isProcessing = false;
+async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, io, importDataId, fileName) {
+  const importDataRowsCollection = database.collection('ImportDataRows');
+  const item = rowDoc.data || {};
+  const columnMapping = importDataDoc.columnMapping || {};
+  const schemaName = schemaDoc.entity || importDataDoc.schemaName;
+
+  if (!schemaName) {
+    await handleRowError(
+      importDataRowsCollection,
+      rowDoc,
+      'Schema name is missing for Bulk Update import',
+      io,
+      importDataId,
+      fileName
+    );
+    return {};
+  }
+
+  const mappedPayload = {};
+
+  for (const [excelCol, fieldKey] of Object.entries(columnMapping)) {
+    if (!fieldKey || fieldKey === 'REMOVE_MAPPING') continue;
+    const rawValue = item[excelCol];
+    if (rawValue === null || rawValue === undefined) continue;
+    const stringVal = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue).trim();
+    if (stringVal === '') continue;
+
+    if (fieldKey === '_id') {
+      mappedPayload._id = stringVal;
+    } else {
+      mappedPayload[fieldKey] = rawValue;
+    }
+  }
+
+  if (Object.keys(mappedPayload).length === 0) {
+    await handleRowError(
+      importDataRowsCollection,
+      rowDoc,
+      'No mapped data found for this row',
+      io,
+      importDataId,
+      fileName
+    );
+    return {};
+  }
+
+  // Validate required fields based on schema.requiredFields
+  const requiredFields = Array.isArray(schemaDoc.requiredFields) ? schemaDoc.requiredFields : [];
+  for (const fieldPath of requiredFields) {
+    const value = mappedPayload[fieldPath];
+    const isEmptyString = typeof value === 'string' && value.trim() === '';
+    const isEmptyArray = Array.isArray(value) && value.length === 0;
+    if (value === undefined || value === null || isEmptyString || isEmptyArray) {
+      await handleRowError(
+        importDataRowsCollection,
+        rowDoc,
+        `Missing required field: ${fieldPath}`,
+        io,
+        importDataId,
+        fileName
+      );
+      return {};
+    }
+  }
+
+  // Resolve lookup/ObjectId fields using exportConfig
+  const exportFields = Array.isArray(schemaDoc.exportConfig?.fields) ? schemaDoc.exportConfig.fields : [];
+
+  const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  for (const [fieldKey, currentValue] of Object.entries(mappedPayload)) {
+    const fieldCfg = exportFields.find((f) => f && f.key === fieldKey);
+    if (!fieldCfg || !fieldCfg.entity || !fieldCfg.lookupDisplayField) continue;
+
+    const collection = database.collection(fieldCfg.entity);
+    const displayField = fieldCfg.displayField;
+    const isArrayField = fieldCfg.isArray || (typeof fieldCfg.type === 'string' && fieldCfg.type.endsWith('[]'));
+
+    if (!isArrayField) {
+      const raw = Array.isArray(currentValue) ? currentValue[0] : currentValue;
+      const searchValue = String(raw).trim();
+      if (!searchValue) continue;
+
+      const lookupQuery = {
+        [fieldCfg.lookupDisplayField]: {
+          $regex: new RegExp(`^${escapeRegExp(searchValue)}$`, 'i')
+        }
+      };
+
+      const doc = await collection.findOne(lookupQuery);
+      if (!doc) {
+        await handleRowError(
+          importDataRowsCollection,
+          rowDoc,
+          `${fieldCfg.label || fieldKey} "${searchValue}" not found`,
+          io,
+          importDataId,
+          fileName
+        );
+        return {};
+      }
+
+      mappedPayload[fieldKey] = doc._id;
+      if (displayField) {
+        mappedPayload[displayField] =
+          doc[fieldCfg.lookupDisplayField] ??
+          doc[displayField] ??
+          searchValue;
+      }
+    } else {
+      const valuesArray = Array.isArray(currentValue)
+        ? currentValue
+        : String(currentValue)
+          .split(',')
+          .map((v) => v.trim())
+          .filter((v) => v);
+
+      if (!valuesArray.length) continue;
+
+      const foundIds = [];
+      const foundNames = [];
+      const missing = [];
+
+      for (const name of valuesArray) {
+        const lookupQuery = {
+          [fieldCfg.lookupDisplayField]: {
+            $regex: new RegExp(`^${escapeRegExp(name)}$`, 'i')
+          }
+        };
+        const doc = await collection.findOne(lookupQuery);
+        if (!doc) {
+          missing.push(name);
+          continue;
+        }
+        foundIds.push(doc._id);
+        foundNames.push(
+          doc[fieldCfg.lookupDisplayField] ??
+          doc[displayField] ??
+          name
+        );
+      }
+
+      if (missing.length > 0) {
+        await handleRowError(
+          importDataRowsCollection,
+          rowDoc,
+          `${fieldCfg.label || fieldKey} values not found: ${missing.join(', ')}`,
+          io,
+          importDataId,
+          fileName
+        );
+        return {};
+      }
+
+      mappedPayload[fieldKey] = foundIds;
+      if (displayField) {
+        const joinWith = fieldCfg.joinWith || ', ';
+        mappedPayload[displayField] = foundNames.join(joinWith);
+      }
+    }
+  }
+
+  try {
+    let message;
+
+    if (mappedPayload._id) {
+      const { _id, ...updatePayload } = mappedPayload;
+      const updateRes = await updateEntity(schemaName, _id, updatePayload);
+      if (!updateRes || updateRes.success === false) {
+        throw new Error(updateRes?.message || 'Failed to update record');
+      }
+      message = `Updated existing ${schemaName} record`;
+    } else {
+      const createRes = await createEntity(schemaName, mappedPayload);
+      if (!createRes || createRes.success === false) {
+        throw new Error(createRes?.message || 'Failed to create record');
+      }
+      message = `Created new ${schemaName} record`;
+    }
+
+    await importDataRowsCollection.updateOne(
+      { _id: rowDoc._id },
+      {
+        $set: {
+          status: 'success',
+          message,
+          processedAt: new Date()
+        }
+      }
+    );
+
+    return {};
+  } catch (error) {
+    await handleRowError(
+      importDataRowsCollection,
+      rowDoc,
+      error.message || 'Bulk update failed',
+      io,
+      importDataId,
+      fileName
+    );
+    return {};
+  }
+}
+
+let isProcessingShipment = false;
+let isProcessingBulkUpdate = false;
 
 async function checkAndProcessImportData(io) {
-  if (isProcessing) {
+  if (isProcessingShipment) {
     console.log('⏸️ ImportData processing already in progress, skipping this execution');
     return;
   }
 
-  isProcessing = true;
+  isProcessingShipment = true;
   const dbClient = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
 
   try {
@@ -828,6 +1034,18 @@ async function checkAndProcessImportData(io) {
         continue;
       }
 
+      if (importDataDoc.type === 'Bulk Update' || importDataDoc.schemaName) {
+        console.log(`⏭️ Skipping Bulk Update ImportData ${importDataId} in Shipment Association processor`);
+        await importDataRowsCollection.updateMany(
+          { _id: { $in: rows.map(r => r._id) } },
+          {
+            $set: { status: 'pending' },
+            $unset: { processingStartedAt: "" }
+          }
+        );
+        continue;
+      }
+
       const columnMapping = importDataDoc.columnMapping || {};
       const fileName = importDataDoc.fileName;
 
@@ -859,6 +1077,9 @@ async function checkAndProcessImportData(io) {
           const currentProcessing = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'processing' });
           const processed = currentSuccess + currentFailure;
 
+          // Fetch latest status for this row to send row-level progress
+          const latestRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+
           io.emit('importDataProgress', {
             importDataId: importDataId.toString(),
             fileName: fileName,
@@ -866,7 +1087,10 @@ async function checkAndProcessImportData(io) {
             total: totalRows,
             success: currentSuccess,
             errors: currentFailure,
-            remaining: currentPending + currentProcessing
+            remaining: currentPending + currentProcessing,
+            rowId: rowDoc._id.toString(),
+            status: latestRow?.status,
+            error: latestRow?.error
           });
 
           if (currentPending === 0 && currentProcessing === 0) {
@@ -944,7 +1168,228 @@ async function checkAndProcessImportData(io) {
     } catch (closeError) {
       console.error(' Error closing database connection:', closeError);
     }
-    isProcessing = false;
+    isProcessingShipment = false;
+  }
+}
+
+async function checkAndProcessBulkUpdateImportData(io) {
+  if (isProcessingBulkUpdate) {
+    console.log('⏸️ Bulk Update ImportData processing already in progress, skipping this execution');
+    return;
+  }
+
+  isProcessingBulkUpdate = true;
+  const dbClient = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
+
+  try {
+    await dbClient.connect();
+    const database = dbClient.db(process.env.DB_NAME);
+    const importDataCollection = database.collection('ImportData');
+    const schemaCollection = database.collection('Schema');
+    const importDataRowsCollection = database.collection('ImportDataRows');
+
+    const candidateRows = await importDataRowsCollection.find({
+      status: 'pending'
+    }).limit(100).toArray();
+
+    if (candidateRows.length === 0) {
+      console.log('⏰ No pending ImportDataRows to process for Bulk Update');
+      return;
+    }
+
+    const processingStartedAt = new Date();
+    const candidateIds = candidateRows.map(row => row._id);
+
+    const claimResult = await importDataRowsCollection.updateMany(
+      {
+        _id: { $in: candidateIds },
+        status: 'pending'
+      },
+      {
+        $set: {
+          status: 'processing',
+          processingStartedAt: processingStartedAt
+        }
+      }
+    );
+
+    if (claimResult.modifiedCount === 0) {
+      console.log('⏰ No Bulk Update rows available for processing (may be claimed by another instance)');
+      return;
+    }
+
+    const claimedRows = await importDataRowsCollection.find({
+      _id: { $in: candidateIds },
+      status: 'processing',
+      processingStartedAt: processingStartedAt
+    }).toArray();
+
+    if (claimedRows.length === 0) {
+      console.log('⏰ No Bulk Update rows successfully claimed for processing');
+      return;
+    }
+
+    console.log(`📋 Successfully claimed ${claimedRows.length} Bulk Update ImportDataRows to process`);
+
+    const rowsByImportData = {};
+    for (const row of claimedRows) {
+      if (!rowsByImportData[row.importDataId]) {
+        rowsByImportData[row.importDataId] = [];
+      }
+      rowsByImportData[row.importDataId].push(row);
+    }
+
+    for (const [importDataId, rows] of Object.entries(rowsByImportData)) {
+      const importDataDoc = await importDataCollection.findOne({ _id: new ObjectId(importDataId) });
+
+      if (!importDataDoc) {
+        console.error(` ImportData document not found for ID: ${importDataId}`);
+        for (const rowDoc of rows) {
+          await handleRowError(importDataRowsCollection, rowDoc, 'ImportData document not found', io, importDataId.toString(), '');
+        }
+        continue;
+      }
+
+      // Consider any ImportData with explicit Bulk Update type OR schemaName as Bulk Update
+      if (importDataDoc.type !== 'Bulk Update' && !importDataDoc.schemaName) {
+        await importDataRowsCollection.updateMany(
+          { _id: { $in: rows.map(r => r._id) } },
+          {
+            $set: { status: 'pending' },
+            $unset: { processingStartedAt: "" }
+          }
+        );
+        continue;
+      }
+
+      const fileName = importDataDoc.fileName;
+
+      // Load schema definition for this Bulk Update import
+      const schemaName = importDataDoc.schemaName;
+      const schemaQuery = [];
+      if (schemaName) {
+        schemaQuery.push({ entity: schemaName });
+        schemaQuery.push({ name: schemaName });
+        if (ObjectId.isValid(schemaName)) {
+          schemaQuery.push({ _id: new ObjectId(schemaName) });
+        }
+      }
+
+      const schemaDoc = await schemaCollection.findOne(
+        schemaQuery.length ? { $or: schemaQuery } : { entity: schemaName }
+      );
+
+      if (!schemaDoc) {
+        console.error(` Schema not found for Bulk Update import. schemaName: ${schemaName}`);
+        for (const rowDoc of rows) {
+          await handleRowError(
+            importDataRowsCollection,
+            rowDoc,
+            'Schema not found for Bulk Update import',
+            io,
+            importDataId.toString(),
+            fileName
+          );
+        }
+        continue;
+      }
+
+      console.log(`📦 Processing ${rows.length} Bulk Update rows for ImportData ${importDataId} (${fileName})`);
+
+      const totalRows = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId) });
+
+      for (const rowDoc of rows) {
+        try {
+          await processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, io, importDataId.toString(), fileName);
+
+          const currentSuccess = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'success' });
+          const currentFailure = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'failure' });
+          const currentPending = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'pending' });
+          const currentProcessing = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'processing' });
+          const processed = currentSuccess + currentFailure;
+
+          // Fetch latest status for this row to send row-level progress
+          const latestRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+
+          io.emit('importDataProgress', {
+            importDataId: importDataId.toString(),
+            fileName: fileName,
+            processed: processed,
+            total: totalRows,
+            success: currentSuccess,
+            errors: currentFailure,
+            remaining: currentPending + currentProcessing,
+            rowId: rowDoc._id.toString(),
+            status: latestRow?.status,
+            error: latestRow?.error
+          });
+
+          if (currentPending === 0 && currentProcessing === 0) {
+            const finalSuccessCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'success' });
+            const finalFailureCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'failure' });
+            const finalPendingReconciliationCount = await importDataRowsCollection.countDocuments({ importDataId: new ObjectId(importDataId), status: 'pending_reconciliation' });
+
+            const allRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId) }).toArray();
+
+            await importDataCollection.updateOne(
+              { _id: new ObjectId(importDataId) },
+              {
+                $set: {
+                  processingStatus: 'completed',
+                  processedAt: new Date(),
+                  counts: {
+                    total: totalRows,
+                    success: finalSuccessCount,
+                    failure: finalFailureCount,
+                    pending: finalPendingReconciliationCount
+                  }
+                }
+              }
+            );
+
+            io.emit('importDataComplete', {
+              importDataId: importDataId.toString(),
+              fileName: fileName,
+              summary: {
+                total: totalRows,
+                success: finalSuccessCount,
+                error: finalFailureCount
+              },
+              results: allRows.map(row => ({
+                index: row.rowIndex,
+                status: row.status,
+                message: row.message || row.error
+              }))
+            });
+
+            console.log(` Completed processing Bulk Update ImportData ${importDataId}: ${finalSuccessCount} success, ${finalFailureCount} failures out of ${totalRows} total rows`);
+          }
+        } catch (error) {
+          console.error(` Error processing Bulk Update row ${rowDoc._id}:`, error);
+
+          await handleRowError(importDataRowsCollection, rowDoc, error.message, io, importDataId.toString(), fileName);
+
+          await importDataRowsCollection.updateOne(
+            { _id: rowDoc._id },
+            {
+              $set: {
+                errorStack: error.stack
+              }
+            }
+          );
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error(' Error in checkAndProcessBulkUpdateImportData:', error);
+  } finally {
+    try {
+      await dbClient.close();
+    } catch (closeError) {
+      console.error(' Error closing database connection (Bulk Update):', closeError);
+    }
+    isProcessingBulkUpdate = false;
   }
 }
 
@@ -1319,5 +1764,7 @@ module.exports = {
   checkAndProcessImportData,
   processImportDataRow,
   reconcileSizePricingLineItems,
+  checkAndProcessBulkUpdateImportData,
+  processBulkUpdateRow,
 };
 

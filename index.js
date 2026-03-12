@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { checkAndProcessImportData } = require("./cron/processImportData");
+const { checkAndProcessImportData, checkAndProcessBulkUpdateImportData } = require("./cron/processImportData");
 
 const express = require("express");
 const http = require("http");
@@ -163,9 +163,12 @@ server.listen(PORT, () => {
   console.log(`🚀 Server running locally on http://localhost:${PORT}`);
   console.log(`📡 Socket.IO server is ready for connections`);
 
-
   checkAndProcessImportData(io).catch((error) => {
-    console.error(' Error in initial ImportData processing:', error);
+    console.error(' Error in initial Shipment Association ImportData processing:', error);
+  });
+
+  checkAndProcessBulkUpdateImportData(io).catch((error) => {
+    console.error(' Error in initial Bulk Update ImportData processing:', error);
   });
 
   cron.schedule("*/2 * * * *", async () => {
@@ -173,11 +176,17 @@ server.listen(PORT, () => {
     try {
       await checkAndProcessImportData(io);
     } catch (error) {
-      console.error(' Error in cron job execution:', error);
+      console.error(' Error in Shipment Association cron job execution:', error);
+    }
+
+    try {
+      await checkAndProcessBulkUpdateImportData(io);
+    } catch (error) {
+      console.error(' Error in Bulk Update cron job execution:', error);
     }
   });
 
-  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes)`);
+  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes for Shipment Association and Bulk Update)`);
 });
 
 module.exports = app;
