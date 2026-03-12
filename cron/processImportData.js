@@ -918,13 +918,25 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
       const { _id, ...updatePayload } = mappedPayload;
       const updateRes = await updateEntity(schemaName, _id, updatePayload);
       if (!updateRes || updateRes.success === false) {
-        throw new Error(updateRes?.message || 'Failed to update record');
+        let detailedMessage = updateRes?.message || 'Failed to update record';
+        if (Array.isArray(updateRes?.errors) && updateRes.errors.length > 0) {
+          detailedMessage = `Validation failed: ${updateRes.errors.join(' | ')}`;
+        } else if (updateRes?.error) {
+          detailedMessage = updateRes.error;
+        }
+        throw new Error(detailedMessage);
       }
       message = `Updated existing ${schemaName} record`;
     } else {
       const createRes = await createEntity(schemaName, mappedPayload);
       if (!createRes || createRes.success === false) {
-        throw new Error(createRes?.message || 'Failed to create record');
+        let detailedMessage = createRes?.message || 'Failed to create record';
+        if (Array.isArray(createRes?.errors) && createRes.errors.length > 0) {
+          detailedMessage = `Validation failed: ${createRes.errors.join(' | ')}`;
+        } else if (createRes?.error) {
+          detailedMessage = createRes.error;
+        }
+        throw new Error(detailedMessage);
       }
       message = `Created new ${schemaName} record`;
     }
