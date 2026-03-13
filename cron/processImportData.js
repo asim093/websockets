@@ -964,6 +964,9 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
 
   try {
     let message;
+    let operation;
+    let entityId;
+    let webhookPayload;
 
     if (mappedPayload._id) {
       const { _id, ...updatePayload } = mappedPayload;
@@ -978,6 +981,9 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
         throw new Error(detailedMessage);
       }
       message = `Updated existing ${schemaName} record`;
+      operation = 'PUT';
+      entityId = updateRes.id || _id;
+      webhookPayload = updatePayload;
     } else {
       const createRes = await createEntity(schemaName, mappedPayload);
       if (!createRes || createRes.success === false) {
@@ -990,6 +996,18 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
         throw new Error(detailedMessage);
       }
       message = `Created new ${schemaName} record`;
+      operation = 'POST';
+      entityId = createRes.id;
+      webhookPayload = mappedPayload;
+    }
+
+    try {
+      await callMakeWebhook(schemaName, operation, webhookPayload, { id: entityId }, entityId);
+    } catch (webhookError) {
+      console.error(
+        `Error calling webhook for Bulk Update ${schemaName} (${operation})`,
+        webhookError
+      );
     }
 
     await importDataRowsCollection.updateOne(
