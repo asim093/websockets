@@ -1005,7 +1005,7 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
       await callMakeWebhook(schemaName, operation, webhookPayload, { id: entityId }, entityId);
     } catch (webhookError) {
       console.error(
-        `Error calling webhook for Bulk Update ${schemaName} (${operation})`,
+        `error calling webhook for Bulk Update ${schemaName} (${operation})`,
         webhookError
       );
     }
