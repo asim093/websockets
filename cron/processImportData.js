@@ -363,11 +363,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       if (!updateRes?.success) {
         throw new Error(updateRes?.message || 'Failed to update shipment');
       }
-      try {
-        await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
-      } catch (webhookError) {
-        console.error("Error calling webhook for Shipment (update):", webhookError);
-      }
+      // try {
+      //   await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+      // } catch (webhookError) {
+      //   console.error("Error calling webhook for Shipment (update):", webhookError);
+      // }
     } else if (shipmentData?.data?.length === 0) {
       const newShipment = {
         shippingNumber: shippingNumber,
@@ -381,11 +381,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       }
       dbShipmentId = createRes.id;
       trackingData.shipmentIds.push(dbShipmentId.toString());
-      try {
-        await callMakeWebhook('Shipment', 'POST', newShipment, { id: dbShipmentId }, dbShipmentId);
-      } catch (webhookError) {
-        console.error("Error calling webhook for Shipment (create):", webhookError);
-      }
+      // try {
+      //   await callMakeWebhook('Shipment', 'POST', newShipment, { id: dbShipmentId }, dbShipmentId);
+      // } catch (webhookError) {
+      //   console.error("Error calling webhook for Shipment (create):", webhookError);
+      // }
     }
 
     let modifiedCount = 0;
@@ -481,11 +481,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             if (updateRes?.success) {
               sizePricingAddedToSuspected = true;
               sizePricingProcessed = true;
-              try {
-                await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
-              } catch (webhookError) {
-                console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
-              }
+              // try {
+              //   await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+              // } catch (webhookError) {
+              //   console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
+              // }
             }
           }
         }
@@ -590,11 +590,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             const updateRes = await updateEntity('Shipment', dbShipmentId, shipmentUpdatePayload);
             if (updateRes?.success) {
               normalPricingAddedToSuspected = true;
-              try {
-                await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
-              } catch (webhookError) {
-                console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
-              }
+              // try {
+              //   await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId);
+              // } catch (webhookError) {
+              //   console.error("Error calling webhook for Shipment (suspectedProducts update):", webhookError);
+              // }
             }
           }
 
@@ -617,11 +617,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       const updateRes = await updateEntity('lineItem', li._id, updatePayload);
       if (updateRes?.success) {
         modifiedCount += 1;
-        try {
-          await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: li._id }, li._id);
-        } catch (webhookError) {
-          console.error("Error calling webhook for lineItem PUT:", webhookError);
-        }
+        // try {
+        //   await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: li._id }, li._id);
+        // } catch (webhookError) {
+        //   console.error("Error calling webhook for lineItem PUT:", webhookError);
+        // }
       } else {
         const errorMsg = updateRes?.message || 'Unknown error';
         errorReason = `Failed to update line item: ${errorMsg}`;
@@ -971,19 +971,43 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
     if (mappedPayload._id) {
       const { _id, ...updatePayload } = mappedPayload;
       const updateRes = await updateEntity(schemaName, _id, updatePayload);
+
       if (!updateRes || updateRes.success === false) {
-        let detailedMessage = updateRes?.message || 'Failed to update record';
-        if (Array.isArray(updateRes?.errors) && updateRes.errors.length > 0) {
-          detailedMessage = `Validation failed: ${updateRes.errors.join(' | ')}`;
-        } else if (updateRes?.error) {
-          detailedMessage = updateRes.error;
+        const notFound =
+          typeof updateRes?.message === 'string' &&
+          updateRes.message.toLowerCase().includes('no entity found with the provided id');
+
+        if (notFound) {
+          const createPayload = { ...updatePayload };
+          const createRes = await createEntity(schemaName, createPayload);
+          if (!createRes || createRes.success === false) {
+            let detailedMessage = createRes?.message || 'Failed to create record';
+            if (Array.isArray(createRes?.errors) && createRes.errors.length > 0) {
+              detailedMessage = `Validation failed: ${createRes.errors.join(' | ')}`;
+            } else if (createRes?.error) {
+              detailedMessage = createRes.error;
+            }
+            throw new Error(detailedMessage);
+          }
+          message = `Created new ${schemaName} record (because _id did not match any document)`;
+          operation = 'POST';
+          entityId = createRes.id;
+          webhookPayload = createPayload;
+        } else {
+          let detailedMessage = updateRes?.message || 'Failed to update record';
+          if (Array.isArray(updateRes?.errors) && updateRes.errors.length > 0) {
+            detailedMessage = `Validation failed: ${updateRes.errors.join(' | ')}`;
+          } else if (updateRes?.error) {
+            detailedMessage = updateRes.error;
+          }
+          throw new Error(detailedMessage);
         }
-        throw new Error(detailedMessage);
+      } else {
+        message = `Updated existing ${schemaName} record`;
+        operation = 'PUT';
+        entityId = updateRes.id || _id;
+        webhookPayload = updatePayload;
       }
-      message = `Updated existing ${schemaName} record`;
-      operation = 'PUT';
-      entityId = updateRes.id || _id;
-      webhookPayload = updatePayload;
     } else {
       const createRes = await createEntity(schemaName, mappedPayload);
       if (!createRes || createRes.success === false) {
@@ -1001,14 +1025,17 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
       webhookPayload = mappedPayload;
     }
 
-    try {
-      await callMakeWebhook(schemaName, operation, webhookPayload, { id: entityId }, entityId);
-    } catch (webhookError) {
-      console.error(
-        `error calling webhook for Bulk Update ${schemaName} (${operation})`,
-        webhookError
-      );
-    }
+  
+    // if (schemaName === 'Shipment') {
+    //   try {
+    //     await callMakeWebhook(schemaName, operation, webhookPayload, { id: entityId }, entityId);
+    //   } catch (webhookError) {
+    //     console.error(
+    //       `error calling webhook for Bulk Update ${schemaName} (${operation})`,
+    //       webhookError
+    //     );
+    //   }
+    // }
 
     await importDataRowsCollection.updateOne(
       { _id: rowDoc._id },
@@ -1728,12 +1755,12 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
               }
             }
 
-            try {
-              await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: lineItem._id }, lineItem._id);
-              await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: matchedShipment._id }, matchedShipment._id);
-            } catch (webhookError) {
-              console.error("Error calling webhook during reconciliation:", webhookError);
-            }
+            // try {
+            //   await callMakeWebhook('lineItem', 'PUT', updatePayload, { id: lineItem._id }, lineItem._id);
+            //   await callMakeWebhook('Shipment', 'PUT', shipmentUpdatePayload, { id: matchedShipment._id }, matchedShipment._id);
+            // } catch (webhookError) {
+            //   console.error("Error calling webhook during reconciliation:", webhookError);
+            // }
 
             const relatedCsmSkus = matchedSuspectedProducts.map(msp => msp.sku).filter(Boolean);
 
