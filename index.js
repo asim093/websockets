@@ -9,6 +9,7 @@ const cron = require("node-cron");
 
 const { getUserRole } = require("./utils/getuserRole.js");
 const emRoutes = require("./em");
+const { closeWebhookDb } = require("./utils/webhook.js");
 
 const app = express();
 const server = http.createServer(app);
@@ -160,33 +161,25 @@ app.use((err, req, res, next) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Server running locally on http://localhost:${PORT}`);
-  console.log(`📡 Socket.IO server is ready for connections`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 
-  checkAndProcessImportData(io).catch((error) => {
-    console.error(' Error in initial Shipment Association ImportData processing:', error);
+  checkAndProcessImportData(io).catch(console.error);
+  checkAndProcessBulkUpdateImportData(io).catch(console.error);
+
+  cron.schedule("*/30 * * * * *", async () => {
+    try { await checkAndProcessImportData(io); } catch (e) { console.error(e); }
+    try { await checkAndProcessBulkUpdateImportData(io); } catch (e) { console.error(e); }
   });
 
-  checkAndProcessBulkUpdateImportData(io).catch((error) => {
-    console.error(' Error in initial Bulk Update ImportData processing:', error);
-  });
-
-  cron.schedule("*/2 * * * *", async () => {
-    console.log("⏰ Running ImportData processing cron job...");
-    try {
-      await checkAndProcessImportData(io);
-    } catch (error) {
-      console.error(' Error in Shipment Association cron job execution:', error);
-    }
-
-    try {
-      await checkAndProcessBulkUpdateImportData(io);
-    } catch (error) {
-      console.error(' Error in Bulk Update cron job execution:', error);
-    }
-  });
-
-  console.log(`⏰ ImportData processing cron job scheduled (runs every 2 minutes for Shipment Association and Bulk Update)`);
+  console.log("⏰ ImportData cron scheduled (every 30 seconds)");
 });
+
+const shutdown = async (signal) => {
+  console.log(`${signal} received, shutting down...`);
+  await closeWebhookDb();
+  server.close(() => process.exit(0));
+};
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 module.exports = app;

@@ -1,23 +1,42 @@
+
 require("dotenv").config();
 const crypto = require("crypto");
 const { MongoClient } = require("mongodb");
 
-
-
 const QUEUE_COLLECTION = "webhookQueue";
 
-const WEBHOOK_PROCESS_URL = process.env.WEBHOOK_PROCESS_URL || "";
-const WEBHOOK_CRON_SECRET = process.env.WEBHOOK_CRON_SECRET || "";
 
-function serializeForWebhook(obj) {
-  if (obj == null) return obj;
-  if (typeof obj !== "object") return obj;
-  if (obj.constructor && obj.constructor.name === "ObjectId") return obj.toString();
-  if (obj instanceof Date) return obj.toISOString();
-  if (Array.isArray(obj)) return obj.map(serializeForWebhook);
-  const out = {};
-  for (const k of Object.keys(obj)) out[k] = serializeForWebhook(obj[k]);
-  return out;
+let _sharedClient = null;
+let _sharedDb = null;
+let _connectingPromise = null;
+
+async function getDb() {
+  if (_sharedDb) return _sharedDb;
+  if (_connectingPromise) return _connectingPromise;
+
+  _connectingPromise = (async () => {
+    _sharedClient = new MongoClient(process.env.MONGODB_CONNECTION_STRING, {
+      maxPoolSize: 5,
+      minPoolSize: 1,
+      serverSelectionTimeoutMS: 5000,
+    });
+    await _sharedClient.connect();
+    _sharedDb = _sharedClient.db(process.env.DB_NAME);
+    _connectingPromise = null;
+    console.log("📦 Webhook DB connection established (shared)");
+    return _sharedDb;
+  })();
+
+  return _connectingPromise;
+}
+
+async function closeWebhookDb() {
+  if (_sharedClient) {
+    await _sharedClient.close();
+    _sharedClient = null;
+    _sharedDb = null;
+    console.log("📦 Webhook DB connection closed");
+  }
 }
 
 
@@ -104,23 +123,15 @@ function separateFileFields(data, entityType) {
   return { regularData, files };
 }
 
-// --- Queue helpers (mirrors webhookQueue.js shape) ---
-
 function buildIdempotencyKey(entityType, operation, entityId) {
   const raw = `${entityType}:${operation}:${entityId || ""}`;
   return crypto.createHash("sha256").update(raw, "utf8").digest("hex").substring(0, 32);
 }
 
-function buildQueueDocFromOptions(options) {
+function buildQueueDoc(options) {
   const {
-    entityType,
-    operation,
-    data,
-    responseData = null,
-    entityId = null,
-    actionType = null,
-    files = [],
-    headers = {},
+    entityType, operation, data, responseData = null,
+    entityId = null, actionType = null, files = [], headers = {},
   } = options;
 
   let finalEntityId = entityId;
@@ -131,7 +142,6 @@ function buildQueueDocFromOptions(options) {
     finalEntityId = finalEntityId.toString();
   }
 
-  const idempotencyKey = buildIdempotencyKey(entityType, operation, finalEntityId);
   return {
     entityType,
     operation,
@@ -145,56 +155,40 @@ function buildQueueDocFromOptions(options) {
     retryCount: 0,
     nextRetryAt: null,
     claimedAt: null,
-    idempotencyKey,
+    idempotencyKey: buildIdempotencyKey(entityType, operation, finalEntityId),
     createdAt: new Date(),
   };
 }
 
 async function enqueueWebhookEvent(options) {
-  const queueDoc = buildQueueDocFromOptions(options);
-  const client = new MongoClient(process.env.MONGODB_CONNECTION_STRING);
-  await client.connect();
-  const db = client.db(process.env.DB_NAME);
-  const coll = db.collection(QUEUE_COLLECTION);
+  const queueDoc = buildQueueDoc(options);
 
-  const windowStart = new Date(Date.now() - 60 * 1000); // 1 minute idempotency window
-  const existing = await coll.findOne({
-    idempotencyKey: queueDoc.idempotencyKey,
-    status: { $in: ["pending", "processing"] },
-    createdAt: { $gte: windowStart },
-  });
-  if (existing) {
-    console.log(
-      `📤 Webhook duplicate skipped (idempotency): ${queueDoc.operation} ${queueDoc.entityType}${
-        queueDoc.entityId ? ` (${queueDoc.entityId})` : ""
-      }`
-    );
-    await client.close();
-    return;
-  }
-
-  await coll.insertOne(queueDoc);
-  await client.close();
-  console.log(
-    `📤 Webhook enqueued: ${queueDoc.operation} ${queueDoc.entityType}${
-      queueDoc.entityId ? ` (${queueDoc.entityId})` : ""
-    }`
-  );
-}
-
-function triggerWebhookProcessNow() {
-  if (!WEBHOOK_PROCESS_URL || !WEBHOOK_CRON_SECRET) return;
-  const url = `${WEBHOOK_PROCESS_URL}?secret=${encodeURIComponent(WEBHOOK_CRON_SECRET)}`;
-  // Fire-and-forget – no await
   try {
-    // Node 18+ has global fetch
-    fetch(url).catch(() => {});
-  } catch (_) {
-    // ignore if fetch not available
+    const db = await getDb();
+    const coll = db.collection(QUEUE_COLLECTION);
+
+    const windowStart = new Date(Date.now() - 60 * 1000);
+    const existing = await coll.findOne({
+      idempotencyKey: queueDoc.idempotencyKey,
+      status: { $in: ["pending", "processing"] },
+      createdAt: { $gte: windowStart },
+    });
+
+    if (existing) {
+      console.log(`📤 Webhook duplicate skipped: ${queueDoc.operation} ${queueDoc.entityType}${queueDoc.entityId ? ` (${queueDoc.entityId})` : ""}`);
+      return;
+    }
+
+    await coll.insertOne(queueDoc);
+    console.log(`📤 Webhook enqueued: ${queueDoc.operation} ${queueDoc.entityType}${queueDoc.entityId ? ` (${queueDoc.entityId})` : ""}`);
+  } catch (err) {
+    console.error("Webhook enqueue error:", err.message);
+    _sharedDb = null;
+    _sharedClient = null;
+    throw err;
   }
 }
 
-// Public API used by cron/processImportData.js
 async function callMakeWebhook(
   entityType,
   operation,
@@ -204,8 +198,6 @@ async function callMakeWebhook(
   actiontype = null,
   headers = {}
 ) {
-  console.log("callMakeWebhook (queue)", entityType, operation, data, responseData, entityId);
-
   let finalEntityId = entityId;
   if (!finalEntityId && responseData) {
     finalEntityId = responseData?.id || responseData?._id || data?._id;
@@ -223,11 +215,9 @@ async function callMakeWebhook(
     files,
     headers: headers || {},
   });
-
-  triggerWebhookProcessNow();
 }
 
 module.exports = {
   callMakeWebhook,
+  closeWebhookDb,
 };
-
