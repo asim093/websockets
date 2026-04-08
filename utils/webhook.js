@@ -23,7 +23,7 @@ async function getDb() {
     await _sharedClient.connect();
     _sharedDb = _sharedClient.db(process.env.DB_NAME);
     _connectingPromise = null;
-    console.log("📦 Webhook DB connection established (shared)");
+    console.log(" Webhook DB connection established (shared)");
     return _sharedDb;
   })();
 
@@ -35,7 +35,7 @@ async function closeWebhookDb() {
     await _sharedClient.close();
     _sharedClient = null;
     _sharedDb = null;
-    console.log("📦 Webhook DB connection closed");
+    console.log(" Webhook DB connection closed");
   }
 }
 

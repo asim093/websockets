@@ -16,6 +16,55 @@ function formatShippingMode(mode) {
   return mode;
 }
 
+function normalPricingShippingModesCompatible(importModeFormatted, slotModeRaw) {
+  const slotFmt = slotModeRaw != null && String(slotModeRaw).trim() !== "" ? formatShippingMode(slotModeRaw) : null;
+  const imp = importModeFormatted || null;
+  if (!imp && !slotFmt) return true;
+  if (imp && slotFmt) return imp.toLowerCase() === slotFmt.toLowerCase();
+  return true;
+}
+
+function forceShippedStatusForAssociatedShipments(shipments = []) {
+  return shipments.map((s) => {
+    const hasShipmentId = s?.shipmentId != null && String(s.shipmentId).trim() !== "";
+    const hasShipmentName = s?.shipmentName != null && String(s.shipmentName).trim() !== "";
+    if (hasShipmentId && hasShipmentName) return { ...s, status: "Shipped" };
+    return s;
+  });
+}
+
+function summarizeLineItemShipmentsForLog(shipments = []) {
+  return (Array.isArray(shipments) ? shipments : []).map((s) => ({
+    id: s?.id,
+    quantity: s?.quantity,
+    status: s?.status,
+    shipmentId: s?.shipmentId,
+    shipmentName: s?.shipmentName,
+    shippingMode: s?.shippingMode,
+    sizeBreakdownLen: Array.isArray(s?.sizeBreakdown) ? s.sizeBreakdown.length : 0,
+  }));
+}
+
+async function removeNormalPricingSuspectedProduct(database, shipmentId, sku) {
+  try {
+    if (!shipmentId || !sku) return;
+    const shipmentsCollection = database.collection("Shipment");
+    const existing = await shipmentsCollection.findOne({ _id: new ObjectId(shipmentId) });
+    if (!existing) return;
+    const current = Array.isArray(existing.suspectedProducts) ? existing.suspectedProducts : [];
+    if (current.length === 0) return;
+    const next = current.filter((sp) => !(sp && sp.sku === sku && !sp.sizeName));
+    if (next.length === current.length) return;
+    const updateRes = await updateEntity("Shipment", shipmentId, { suspectedProducts: next });
+    if (updateRes?.success) {
+      callMakeWebhook("Shipment", "PUT", { suspectedProducts: next }, { id: shipmentId }, shipmentId)
+        .catch(e => console.error("Webhook Shipment suspectedProducts cleanup:", e));
+    }
+  } catch (e) {
+    console.error("Failed to remove normalPricing suspectedProducts:", e);
+  }
+}
+
 function parseDateString(dateString) {
   if (!dateString) return null;
   try {
@@ -169,12 +218,6 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       isSizePricingCase = true;
     }
 
-    const lineItemStatus = lineItem.status || "";
-    if (lineItemStatus === "Invoiced" || lineItemStatus === "Delivered") {
-      await handleRowError(importDataRowsCollection, rowDoc, `Line item has invalid status (${lineItemStatus}). Cannot update line items with status Invoiced or Delivered.`, io, importDataId, fileName);
-      return;
-    }
-
     const shipmentData = await getAggregatedData({ entityType: "Shipment", filter: { shippingNumber }, pagination: { page: 1, pageSize: 10 } });
     if (shipmentData?.data?.length > 1) {
       await handleRowError(importDataRowsCollection, rowDoc, `Multiple shipments found with shipping number: ${shippingNumber}`, io, importDataId, fileName);
@@ -276,16 +319,21 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
         for (let i = 0; i < shipmentsArray.length; i++) {
           const shipment = shipmentsArray[i];
+          const shipmentStatus = shipment.status || "";
+          if (shipment.invoiceId || shipmentStatus === "Invoiced" || shipmentStatus === "Delivered") {
+            await handleRowError(importDataRowsCollection, rowDoc, `Line Item has invalid status (${shipmentStatus}). Cannot update line items with status Invoiced or Delivered.`, io, importDataId, fileName);
+            return;
+          }
           if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
             const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
-            const formattedShippingMode = formatShippingMode(shippingMode);
-            const modeMatches = formattedShippingMode && shipment.shippingMode && formattedShippingMode.toLowerCase() === shipment.shippingMode.toLowerCase();
+            const modeMatches = normalPricingShippingModesCompatible(shippingMode, shipment.shippingMode);
             if (shipmentQuantity === importQty && modeMatches) {
               shipmentsArray[i] = {
                 ...shipment,
                 shipmentId: dbShipmentId.toString(),
                 shipmentName: shippingNumber,
-                shipdate: shipDate ? new Date(Date.UTC(shipDate.getUTCFullYear(), shipDate.getUTCMonth(), shipDate.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0] : null
+                shipdate: shipDate ? new Date(Date.UTC(shipDate.getUTCFullYear(), shipDate.getUTCMonth(), shipDate.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0] : null,
+                status: "Shipped"
               };
               perfectMatchFound = true;
               break;
@@ -317,11 +365,20 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
       if (shipmentsArray.length > existingShipments.length) throw new Error("Invalid state: shipmentsArray length increased.");
 
-      const updatePayload = { shipments: shipmentsArray };
+      const updatePayload = { shipments: forceShippedStatusForAssociatedShipments(shipmentsArray) };
+      console.log("[import][lineItem PUT]", {
+        lineItemId: String(li._id),
+        rowId: String(rowDoc?._id || ""),
+        importDataId: String(importDataId || ""),
+        shipments: summarizeLineItemShipmentsForLog(updatePayload.shipments),
+      });
       const updateRes = await updateEntity("lineItem", li._id, updatePayload);
       if (updateRes?.success) {
         modifiedCount += 1;
         callMakeWebhook("lineItem", "PUT", updatePayload, { id: li._id }, li._id).catch(e => console.error("Webhook lineItem PUT:", e));
+        if (!isSizePricingCase && dbShipmentId && product?.sku) {
+          await removeNormalPricingSuspectedProduct(database, dbShipmentId, product.sku);
+        }
       } else {
         errorReason = `Failed to update line item: ${updateRes?.message || "Unknown error"}`;
       }
@@ -552,7 +609,7 @@ async function checkAndProcessImportData(io) {
 
       const columnMapping = importDataDoc.columnMapping || {};
       const fileName = importDataDoc.fileName;
-      console.log(`📦 Processing ${rows.length} rows for ${importDataId} (${fileName})`);
+      console.log(` Processing ${rows.length} rows for ${importDataId} (${fileName})`);
 
       const initialCounts = await getStatusCounts(importDataRowsCollection, importDataId);
       const totalRows = initialCounts.total;
@@ -684,7 +741,7 @@ async function checkAndProcessBulkUpdateImportData(io) {
         continue;
       }
 
-      console.log(`📦 Processing ${rows.length} Bulk Update rows for ${importDataId} (${fileName})`);
+      console.log(` Processing ${rows.length} Bulk Update rows for ${importDataId} (${fileName})`);
 
       const initialCounts = await getStatusCounts(importDataRowsCollection, importDataId);
       const totalRows = initialCounts.total;
@@ -741,7 +798,6 @@ async function checkAndProcessBulkUpdateImportData(io) {
 
 async function reconcileSizePricingLineItems(database, io, importDataId, fileName, trackedLineItemIds = [], trackedShipmentIds = []) {
   try {
-    console.log("🔄 Starting reconciliation...");
     if (trackedLineItemIds.length === 0 || trackedShipmentIds.length === 0) { console.log("No tracked items for reconciliation"); return; }
 
     const shipmentsCollection = database.collection("Shipment");
@@ -766,6 +822,30 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
       for (let i = 0; i < shipmentsArray.length; i++) {
         const shipmentObj = shipmentsArray[i];
         const shipmentSizeBreakdown = Array.isArray(shipmentObj.sizeBreakdown) ? shipmentObj.sizeBreakdown : [];
+
+        const shipmentStatus = shipmentObj.status || "";
+        if (shipmentObj.invoiceId ||shipmentStatus === "Invoiced" || shipmentStatus === "Delivered") {
+          const sizeNamesBlocked = shipmentSizeBreakdown.map(s => s.sizeName).filter(Boolean);
+          const blockedSkus = lineItemSizeBreakdown.filter(s => sizeNamesBlocked.includes(s.sizeName)).map(s => s.csmSku).filter(Boolean);
+          if (blockedSkus.length > 0) {
+            const blockedRows = await importDataRowsCollection.find({
+              importDataId: new ObjectId(importDataId),
+              "data.SKU": { $in: blockedSkus },
+              status: "pending_reconciliation"
+            }).toArray();
+            for (const br of blockedRows) {
+              await handleRowError(
+                importDataRowsCollection,
+                br,
+                `Line Item shipment has invalid status (${shipmentStatus}). Cannot reconcile while Invoiced or Delivered.`,
+                io,
+                importDataId,
+                fileName
+              );
+            }
+          }
+          continue;
+        }
         if (shipmentSizeBreakdown.length === 0) continue;
 
         const tryMatchShipments = (shipmentsList) => {
@@ -817,10 +897,17 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
             shipmentId: matchedShipment._id.toString(),
             shipmentName: matchedShipment.shippingNumber || matchedShipment.name || "",
             shipdate: matchedShipment.shipDate ? new Date(Date.UTC(matchedShipment.shipDate.getUTCFullYear(), matchedShipment.shipDate.getUTCMonth(), matchedShipment.shipDate.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0] : null,
-            shippingMode: matchedShipment.shippingMode || shipmentObj.shippingMode || "Air"
+            shippingMode: matchedShipment.shippingMode || shipmentObj.shippingMode || "Air",
+            status: "Shipped"
           };
 
-          const updatePayload = { shipments: shipmentsArray };
+          const updatePayload = { shipments: forceShippedStatusForAssociatedShipments(shipmentsArray) };
+          console.log("[reconcile][lineItem PUT]", {
+            lineItemId: String(lineItem._id),
+            importDataId: String(importDataId || ""),
+            matchedShipmentId: String(matchedShipment?._id || ""),
+            shipments: summarizeLineItemShipmentsForLog(updatePayload.shipments),
+          });
           const updateRes = await updateEntity("lineItem", lineItem._id, updatePayload);
           if (updateRes?.success) {
             reconciledCount++;

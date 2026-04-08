@@ -31,7 +31,7 @@ const fetchTemplateByName = async (templateName) => {
         if (template) {
             console.log(` Template found: "${templateName}"`);
         } else {
-            console.warn(`⚠️  Template not found or inactive: "${templateName}"`);
+            console.warn(`  Template not found or inactive: "${templateName}"`);
         }
         return template;
     } catch (error) {
@@ -78,7 +78,7 @@ const extractRepIds = (entity, recipientsIds) => {
 const handleRequestType = async (objectId, recipientsIds) => {
     const requestData = await fetchEntityDataRaw("Request", objectId);
     if (!requestData) {
-        console.warn("⚠️  Request not found:", objectId);
+        console.warn("  Request not found:", objectId);
         return {};
     }
     console.log("📋 Request repId count:", Array.isArray(requestData.repId) ? requestData.repId.length : requestData.repId ? 1 : 0);
@@ -89,13 +89,13 @@ const handleRequestType = async (objectId, recipientsIds) => {
 const handleDesignVersionType = async (objectId, recipientsIds) => {
     const designVersionData = await fetchEntityDataRaw("DesignVersion", objectId);
     if (!designVersionData?.designId) {
-        console.warn("⚠️  DesignVersion not found or missing designId:", objectId);
+        console.warn("  DesignVersion not found or missing designId:", objectId);
         return {};
     }
 
     const designData = await fetchEntityDataRaw("Design", designVersionData.designId);
     if (!designData?.requestId) {
-        console.warn("⚠️  Design not found or missing requestId:", designVersionData.designId);
+        console.warn("  Design not found or missing requestId:", designVersionData.designId);
         return { designVersion: designVersionData, design: designData };
     }
 
@@ -107,13 +107,13 @@ const handleDesignVersionType = async (objectId, recipientsIds) => {
 const handleSampleLineItemType = async (objectId, recipientsIds) => {
     const lineItemData = await fetchEntityDataRaw("lineItem", objectId);
     if (!lineItemData?.orderId) {
-        console.warn("⚠️  lineItem not found or missing orderId:", objectId);
+        console.warn("  lineItem not found or missing orderId:", objectId);
         return {};
     }
 
     const orderData = await fetchEntityDataRaw("Order", lineItemData.orderId);
     if (!orderData) {
-        console.warn("⚠️  Order not found for lineItem:", lineItemData.orderId);
+        console.warn("  Order not found for lineItem:", lineItemData.orderId);
         return { lineItem: lineItemData };
     }
 
@@ -131,7 +131,7 @@ const handleSampleLineItemType = async (objectId, recipientsIds) => {
         return { lineItem: lineItemData, order: orderData, request: requestData };
     }
 
-    console.warn("⚠️  No rep/repId found on Order or linked Request for SampleLineItem:", objectId);
+    console.warn("  No rep/repId found on Order or linked Request for SampleLineItem:", objectId);
     return { lineItem: lineItemData, order: orderData };
 };
 
@@ -268,7 +268,7 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
     if (handler) {
         entityData = await handler(objectId, recipientsIds) || {};
     } else {
-        console.warn(`⚠️  No handler registered for objectType: "${objectType}"`);
+        console.warn(`  No handler registered for objectType: "${objectType}"`);
     }
 
     if (recipientsIds.length === 0) {
@@ -291,7 +291,7 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
         }));
 
         if (receivers.length !== recipientsIds.length) {
-            console.warn(`⚠️  receivers (${receivers.length}) vs repIds (${recipientsIds.length}) mismatch`);
+            console.warn(`  receivers (${receivers.length}) vs repIds (${recipientsIds.length}) mismatch`);
         }
 
         const config    = TEMPLATE_CONFIG[objectType];
@@ -308,7 +308,7 @@ const sendNotificationtoreps = async (senderRole, objectType, objectId, io = nul
         }
 
         if (!notifContent) {
-            console.warn(`⚠️  Using fallback notification for objectType: ${objectType}`);
+            console.warn(`  Using fallback notification for objectType: ${objectType}`);
             notifContent = {
                 title:    "New Message from Client",
                 body:     `You have received a new message in ${objectType} from the client. Please check for updates.`,

@@ -41,7 +41,7 @@ io.on("connection", (socket) => {
         userRole = await getUserRole(userId);
         if (!userRole) {
           console.warn(
-            `⚠️ No role found for user ${userId}, defaulting to Client`
+            ` No role found for user ${userId}, defaulting to Client`
           );
           userRole = "Client";
         }
@@ -123,13 +123,13 @@ io.on("connection", (socket) => {
           `🎯 Message targeted - sent to ${sentCount} sockets out of ${roomSockets.size} total`
         );
       } else {
-        console.log(`⚠️ No sockets found in room ${room}`);
+        console.log(` No sockets found in room ${room}`);
       }
     }
   });
 
   socket.on("messageVisibilityChanged", (data) => {
-    console.log("🔄 Received visibility change:", data);
+    console.log(" Received visibility change:", data);
 
     if (!data || !data.objectType || !data.object) {
       console.error(" Invalid visibility change data:", data);
@@ -138,7 +138,7 @@ io.on("connection", (socket) => {
 
     const room = `${data.objectType}-${data.object}`;
     socket.to(room).emit("messageVisibilityChanged", data);
-    console.log(`🔄 Visibility change broadcasted to room ${room}`);
+    console.log(` Visibility change broadcasted to room ${room}`);
   });
 
   socket.on("disconnect", () => {

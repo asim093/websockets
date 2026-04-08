@@ -15,7 +15,7 @@ router.put("/Message/:id/visibility", async (req, res) => {
   console.log("🎯 VISIBILITY ROUTE HIT:", req.params.id);
   
   try {
-    console.log("🔄 Updating message visibility:", req.params.id, req.body);
+    console.log(" Updating message visibility:", req.params.id, req.body);
 
     const messageId = req.params.id;
     const { targetRole, visibleToRoles } = req.body.data;
@@ -67,7 +67,7 @@ router.put("/Message/:id/visibility", async (req, res) => {
           object: currentMessage.object.toString()
         };
         req.io.to(roomName).emit("messageVisibilityChanged", visibilityChangeData);
-        console.log("🔄 Broadcasting visibility change to room:", roomName);
+        console.log(" Broadcasting visibility change to room:", roomName);
       }
 
       console.log(" Message visibility updated successfully");

@@ -5,7 +5,7 @@ const router = express.Router();
 
 router.delete("/Message/:id", async (req, res) => {
   try {
-    console.log("🗑️ Deleting message:", req.params.id);
+    console.log(" Deleting message:", req.params.id);
     
     const messageId = req.params.id;
 
