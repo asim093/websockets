@@ -33,6 +33,27 @@ function forceShippedStatusForAssociatedShipments(shipments = []) {
   });
 }
 
+function isLineItemInvoiceLocked(lineItem = {}) {
+  const hasTopLevelInvoiceId = lineItem?.invoiceId != null && String(lineItem.invoiceId).trim() !== "";
+  const hasInvoicesArray = Array.isArray(lineItem?.Invoices) && lineItem.Invoices.length > 0;
+  const shipments = Array.isArray(lineItem?.shipments) ? lineItem.shipments : [];
+  const hasLockedShipment = shipments.some((s) => {
+    const status = String(s?.status || "").trim().toLowerCase();
+    const hasShipmentInvoiceId = s?.invoiceId != null && String(s.invoiceId).trim() !== "";
+    return hasShipmentInvoiceId || status === "invoiced" || status === "delivered";
+  });
+  return hasTopLevelInvoiceId || hasInvoicesArray || hasLockedShipment;
+}
+
+function parseImportQuantity(rawValue) {
+  if (rawValue == null) return { value: null, valid: false };
+  const txt = String(rawValue).trim();
+  if (txt === "") return { value: null, valid: false };
+  const parsed = Number.parseInt(txt, 10);
+  if (!Number.isFinite(parsed)) return { value: null, valid: false };
+  return { value: parsed, valid: true };
+}
+
 function summarizeLineItemShipmentsForLog(shipments = []) {
   return (Array.isArray(shipments) ? shipments : []).map((s) => ({
     id: s?.id,
@@ -136,16 +157,24 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     const poName = getMappedValue(item, "POName", columnMapping) || getMappedValue(item, "PONumber", columnMapping);
     const sku = getMappedValue(item, "SKU", columnMapping);
     const shippingNumber = getMappedValue(item, "shippingNumber", columnMapping);
-    const quantity = getMappedValue(item, "quantity", columnMapping) ? parseInt(getMappedValue(item, "quantity", columnMapping)) : null;
+    const shipDateValue = getMappedValue(item, "shipDate", columnMapping);
+    const quantityRaw = getMappedValue(item, "quantity", columnMapping);
+    const parsedQuantity = parseImportQuantity(quantityRaw);
+    const quantity = parsedQuantity.valid ? parsedQuantity.value : null;
 
     const requiredFields = [
       { value: poName, name: "POName" },
       { value: shippingNumber, name: "shippingNumber" },
       { value: sku, name: "sku" },
-      { value: quantity, name: "quantity" }
+      { value: quantityRaw, name: "quantity" },
+      { value: shipDateValue, name: "shipDate" }
     ];
     for (const field of requiredFields) {
       if (!(await validateRequiredField(field.value, field.name, importDataRowsCollection, rowDoc, io, importDataId, fileName))) return;
+    }
+    if (!parsedQuantity.valid) {
+      await handleRowError(importDataRowsCollection, rowDoc, `Invalid quantity: ${quantityRaw}`, io, importDataId, fileName);
+      return;
     }
 
     const poData = await getAggregatedData({ entityType: "PO", filter: { PONumber: poName }, pagination: { page: 1, pageSize: 1 } });
@@ -195,14 +224,14 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         const sizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
         const matchingSize = sizeBreakdown.find(size => size.csmSku && size.csmSku === sku);
         if (matchingSize) {
-          if (quantity) {
+          if (quantity !== null) {
             if (parseInt(matchingSize.quantity || 0) === parseInt(quantity)) { foundLineItem = li; foundMatchingSize = matchingSize; break; }
           } else {
             if (!foundLineItem) { foundLineItem = li; foundMatchingSize = matchingSize; }
           }
         }
       }
-      if (!foundLineItem && allMatchingLineItems.length > 0) {
+      if (!foundLineItem && quantity === null && allMatchingLineItems.length > 0) {
         const firstLi = allMatchingLineItems[0];
         const matchingSize = (Array.isArray(firstLi.sizeBreakdown) ? firstLi.sizeBreakdown : []).find(s => s.csmSku && s.csmSku === sku);
         if (matchingSize) { foundLineItem = firstLi; foundMatchingSize = matchingSize; }
@@ -218,6 +247,18 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       isSizePricingCase = true;
     }
 
+    if (isLineItemInvoiceLocked(lineItem)) {
+      await handleRowError(
+        importDataRowsCollection,
+        rowDoc,
+        "Line item is invoiced/delivered. No changes are allowed.",
+        io,
+        importDataId,
+        fileName
+      );
+      return { trackingData };
+    }
+
     const shipmentData = await getAggregatedData({ entityType: "Shipment", filter: { shippingNumber }, pagination: { page: 1, pageSize: 10 } });
     if (shipmentData?.data?.length > 1) {
       await handleRowError(importDataRowsCollection, rowDoc, `Multiple shipments found with shipping number: ${shippingNumber}`, io, importDataId, fileName);
@@ -226,17 +267,23 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
     const shippingModeRaw = getMappedValue(item, "shippingMode", columnMapping) || null;
     const shippingMode = shippingModeRaw ? formatShippingMode(shippingModeRaw) : null;
-    const shipDateValue = getMappedValue(item, "shipDate", columnMapping);
-    let shipDate = shipDateValue ? parseDateString(shipDateValue) : null;
+    let shipDate = parseDateString(shipDateValue);
     if (!shipDate) {
-      const now = new Date();
-      shipDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+      await handleRowError(importDataRowsCollection, rowDoc, `Invalid shipDate: ${shipDateValue}`, io, importDataId, fileName);
+      return;
+    }
+
+    const existingShipment = shipmentData?.data?.length === 1 ? shipmentData.data[0] : null;
+    const existingShipmentMode = existingShipment?.shippingMode ? formatShippingMode(existingShipment.shippingMode) : null;
+    let effectiveShippingMode = shippingMode;
+    if (!effectiveShippingMode) {
+      effectiveShippingMode = existingShipment ? existingShipmentMode : "Air";
     }
 
     let eta = null;
-    if (shipDate && shippingMode) {
+    if (shipDate && effectiveShippingMode) {
       eta = new Date(shipDate);
-      const up = shippingMode.toUpperCase();
+      const up = effectiveShippingMode.toUpperCase();
       if (up === "AIR") eta.setDate(eta.getDate() + 14);
       else if (up === "SEA" || up === "BOAT") eta.setDate(eta.getDate() + 35);
       else if (up === "GROUND") eta.setDate(eta.getDate() + 3);
@@ -246,12 +293,12 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     if (shipmentData?.data?.length === 1) {
       dbShipmentId = shipmentData.data[0]._id;
       trackingData.shipmentIds.push(dbShipmentId.toString());
-      const shipmentUpdatePayload = { shippingNumber, shippingMode, shipDate, eta };
+      const shipmentUpdatePayload = { shippingNumber, shippingMode: effectiveShippingMode, shipDate, eta };
       const updateRes = await updateEntity("Shipment", dbShipmentId, shipmentUpdatePayload);
       if (!updateRes?.success) throw new Error(updateRes?.message || "Failed to update shipment");
       callMakeWebhook("Shipment", "PUT", shipmentUpdatePayload, { id: dbShipmentId }, dbShipmentId).catch(e => console.error("Webhook Shipment PUT:", e));
     } else if (shipmentData?.data?.length === 0) {
-      const newShipment = { shippingNumber, shippingMode, shipDate, eta };
+      const newShipment = { shippingNumber, shippingMode: effectiveShippingMode, shipDate, eta };
       const createRes = await createEntity("Shipment", newShipment);
       if (!createRes?.success || !createRes?.id) throw new Error(createRes?.message || "Failed to create shipment");
       dbShipmentId = createRes.id;
@@ -263,6 +310,18 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
     let sizePricingAddedToSuspected = false, sizePricingProcessed = false, normalPricingAddedToSuspected = false;
 
     for (const li of [lineItem]) {
+      if (isLineItemInvoiceLocked(li)) {
+        await handleRowError(
+          importDataRowsCollection,
+          rowDoc,
+          "Line item is invoiced/delivered. No changes are allowed.",
+          io,
+          importDataId,
+          fileName
+        );
+        return { trackingData };
+      }
+
       const existingShipments = Array.isArray(li.shipments) ? li.shipments : [];
       let shipmentsArray = [...existingShipments];
       const lineItemSizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
@@ -278,31 +337,30 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         }
 
         let currentSuspectedProducts = [];
+        let shipmentEntity = null;
         if (dbShipmentId) {
           const shipmentEntityData = await getAggregatedData({ entityType: "Shipment", filter: { _id: new ObjectId(dbShipmentId) }, pagination: { page: 1, pageSize: 1 } });
           if (shipmentEntityData?.data?.length > 0) {
-            currentSuspectedProducts = Array.isArray(shipmentEntityData.data[0].suspectedProducts) ? [...shipmentEntityData.data[0].suspectedProducts] : [];
+            shipmentEntity = shipmentEntityData.data[0];
+            currentSuspectedProducts = Array.isArray(shipmentEntity.suspectedProducts) ? [...shipmentEntity.suspectedProducts] : [];
           }
         }
 
         let matchingSize = matchingSizes.find(size => !currentSuspectedProducts.some(sp => sp.sku === size.csmSku && sp.sizeName === size.sizeName));
         if (!matchingSize) matchingSize = matchingSizes[0];
-        const finalQuantity = quantity ? parseInt(quantity) : parseInt(matchingSize.quantity || 0) || 0;
+        const finalQuantity = quantity !== null ? parseInt(quantity, 10) : parseInt(matchingSize.quantity || 0, 10) || 0;
 
-        if (dbShipmentId) {
-          const shipmentEntityData = await getAggregatedData({ entityType: "Shipment", filter: { _id: new ObjectId(dbShipmentId) }, pagination: { page: 1, pageSize: 1 } });
-          if (shipmentEntityData?.data?.length > 0) {
-            const suspectedProducts = Array.isArray(shipmentEntityData.data[0].suspectedProducts) ? [...shipmentEntityData.data[0].suspectedProducts] : [];
-            const existingIdx = suspectedProducts.findIndex(sp => sp.sku === matchingSize.csmSku && sp.sizeName === matchingSize.sizeName && parseInt(sp.quantity || 0) === finalQuantity);
-            const suspectedProductData = { sizeName: matchingSize.sizeName, sku: matchingSize.csmSku, quantity: finalQuantity };
-            if (existingIdx >= 0) suspectedProducts[existingIdx] = suspectedProductData;
-            else suspectedProducts.push(suspectedProductData);
-            const updateRes = await updateEntity("Shipment", dbShipmentId, { suspectedProducts });
-            if (updateRes?.success) {
-              sizePricingAddedToSuspected = true;
-              sizePricingProcessed = true;
-              callMakeWebhook("Shipment", "PUT", { suspectedProducts }, { id: dbShipmentId }, dbShipmentId).catch(e => console.error("Webhook Shipment suspectedProducts:", e));
-            }
+        if (dbShipmentId && shipmentEntity) {
+          const suspectedProducts = Array.isArray(shipmentEntity.suspectedProducts) ? [...shipmentEntity.suspectedProducts] : [];
+          const existingIdx = suspectedProducts.findIndex(sp => sp.sku === matchingSize.csmSku && sp.sizeName === matchingSize.sizeName && parseInt(sp.quantity || 0) === finalQuantity);
+          const suspectedProductData = { sizeName: matchingSize.sizeName, sku: matchingSize.csmSku, quantity: finalQuantity };
+          if (existingIdx >= 0) suspectedProducts[existingIdx] = suspectedProductData;
+          else suspectedProducts.push(suspectedProductData);
+          const updateRes = await updateEntity("Shipment", dbShipmentId, { suspectedProducts });
+          if (updateRes?.success) {
+            sizePricingAddedToSuspected = true;
+            sizePricingProcessed = true;
+            callMakeWebhook("Shipment", "PUT", { suspectedProducts }, { id: dbShipmentId }, dbShipmentId).catch(e => console.error("Webhook Shipment suspectedProducts:", e));
           }
         }
 
@@ -310,11 +368,12 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           const message = "SizePricing line item - added to suspectedProducts. Will be processed in reconciliation.";
           await importDataRowsCollection.updateOne({ _id: rowDoc._id }, { $set: { status: "pending_reconciliation", message, processedAt: new Date() } });
           io.emit("importDataProgress", { importDataId, fileName, rowId: rowDoc._id.toString(), status: "pending_reconciliation", message });
+          return { trackingData };
         }
         continue;
 
       } else {
-        const importQty = quantity || parseInt(li.quantity || 0) || 0;
+        const importQty = quantity !== null ? quantity : (parseInt(li.quantity || 0, 10) || 0);
         let perfectMatchFound = false, quantityFoundInAnyShipment = false;
 
         for (let i = 0; i < shipmentsArray.length; i++) {
@@ -326,11 +385,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           }
           if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
             const shipmentQuantity = parseInt(shipment.quantity || 0) || 0;
-            const modeMatches = normalPricingShippingModesCompatible(shippingMode, shipment.shippingMode);
+            const modeMatches = normalPricingShippingModesCompatible(effectiveShippingMode, shipment.shippingMode);
             if (shipmentQuantity === importQty && modeMatches) {
               shipmentsArray[i] = {
                 ...shipment,
-                shipmentId: dbShipmentId.toString(),
+                shipmentId: dbShipmentId ? dbShipmentId.toString() : null,
                 shipmentName: shippingNumber,
                 shipdate: shipDate ? new Date(Date.UTC(shipDate.getUTCFullYear(), shipDate.getUTCMonth(), shipDate.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0] : null,
                 status: "Shipped"
@@ -357,7 +416,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             }
           }
           errorReason = quantityFoundInAnyShipment
-            ? `Quantity (${importQty}) or shipping mode (${shippingMode || "N/A"}) does not match any existing shipment. Added to suspectedProducts.`
+            ? `Quantity (${importQty}) or shipping mode (${effectiveShippingMode || "N/A"}) does not match any existing shipment. Added to suspectedProducts.`
             : `No shipment found with quantity in line item shipments. Added to suspectedProducts.`;
           continue;
         }
@@ -392,15 +451,15 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       io.emit("importDataProgress", { importDataId, fileName, rowId: rowDoc._id.toString(), status: "pending_reconciliation", message });
     } else if (normalPricingAddedToSuspected) {
       const message = errorReason || "Added to suspectedProducts. No perfect match found for quantity and shipping mode.";
-      await importDataRowsCollection.updateOne({ _id: rowDoc._id }, { $set: { status: "success", message, processedAt: new Date() } });
-      io.emit("importDataProgress", { importDataId, fileName, rowId: rowDoc._id.toString(), status: "success", message });
+      await importDataRowsCollection.updateOne({ _id: rowDoc._id }, { $set: { status: "failure", message, processedAt: new Date() } });
+      io.emit("importDataProgress", { importDataId, fileName, rowId: rowDoc._id.toString(), status: "failure", message });
     } else {
       const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
       if (existingRowCheck?.status === "pending_reconciliation" || existingRowCheck?.status === "pending" || existingRowCheck?.status === "success") return { trackingData };
       if (sizePricingProcessed || sizePricingAddedToSuspected) return { trackingData };
       let errorMessage = errorReason || (lineItem?.sizeBreakdown?.length > 0
         ? `No perfect match found for SKU: ${sku} in line item shipments. Quantity or shipping mode mismatch. Added to suspectedProducts.`
-        : `No perfect match found for quantity: ${quantity || "N/A"} and shipping mode: ${shippingMode || "N/A"} in line item shipments. Added to suspectedProducts.`);
+        : `No perfect match found for quantity: ${quantity !== null ? quantity : "N/A"} and shipping mode: ${effectiveShippingMode || "N/A"} in line item shipments. Added to suspectedProducts.`);
       await handleRowError(importDataRowsCollection, rowDoc, errorMessage, io, importDataId, fileName);
     }
 
@@ -556,6 +615,7 @@ async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, 
 
 let isProcessingShipment = false;
 let isProcessingBulkUpdate = false;
+const STUCK_PROCESSING_MINUTES = Number.parseInt(process.env.IMPORT_STUCK_PROCESSING_MINUTES || "15", 10);
 
 async function checkAndProcessImportData(io) {
   if (isProcessingShipment) { console.log("⏸️ ImportData processing already in progress, skipping"); return; }
@@ -567,6 +627,21 @@ async function checkAndProcessImportData(io) {
     const database = dbClient.db(process.env.DB_NAME);
     const importDataCollection = database.collection("ImportData");
     const importDataRowsCollection = database.collection("ImportDataRows");
+
+    const stuckBefore = new Date(Date.now() - STUCK_PROCESSING_MINUTES * 60 * 1000);
+    const recovered = await importDataRowsCollection.updateMany(
+      {
+        status: "processing",
+        processingStartedAt: { $lt: stuckBefore },
+      },
+      {
+        $set: { status: "pending" },
+        $unset: { processingStartedAt: "" },
+      }
+    );
+    if (recovered.modifiedCount > 0) {
+      console.log(`♻️ Recovered ${recovered.modifiedCount} stuck processing rows`);
+    }
 
     const candidateRows = await importDataRowsCollection.find({ status: "pending" }).limit(100).toArray();
     if (candidateRows.length === 0) { console.log("⏰ No pending ImportDataRows to process"); return; }
@@ -613,6 +688,14 @@ async function checkAndProcessImportData(io) {
 
       const initialCounts = await getStatusCounts(importDataRowsCollection, importDataId);
       const totalRows = initialCounts.total;
+      const progressCounts = {
+        total: initialCounts.total,
+        success: initialCounts.success,
+        failure: initialCounts.failure,
+        pending: initialCounts.pending,
+        processing: initialCounts.processing,
+        pending_reconciliation: initialCounts.pending_reconciliation,
+      };
 
       const allTrackingData = { sizePricingLineItemIds: [], shipmentIds: [] };
 
@@ -624,22 +707,26 @@ async function checkAndProcessImportData(io) {
             allTrackingData.shipmentIds.push(...result.trackingData.shipmentIds);
           }
 
-          const counts = await getStatusCounts(importDataRowsCollection, importDataId);
           const latestRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+          if (progressCounts.processing > 0) progressCounts.processing -= 1;
+          const latestStatus = latestRow?.status;
+          if (latestStatus && Object.prototype.hasOwnProperty.call(progressCounts, latestStatus)) {
+            progressCounts[latestStatus] += 1;
+          }
 
           io.emit("importDataProgress", {
             importDataId: importDataId.toString(), fileName,
-            processed: counts.success + counts.failure,
+            processed: progressCounts.success + progressCounts.failure,
             total: totalRows,
-            success: counts.success,
-            errors: counts.failure,
-            remaining: counts.pending + counts.processing,
+            success: progressCounts.success,
+            errors: progressCounts.failure,
+            remaining: progressCounts.pending + progressCounts.processing,
             rowId: rowDoc._id.toString(),
             status: latestRow?.status,
             error: latestRow?.error
           });
 
-          if (counts.pending === 0 && counts.processing === 0) {
+          if (progressCounts.pending === 0 && progressCounts.processing === 0) {
             const uniqueLineItemIds = [...new Set(allTrackingData.sizePricingLineItemIds)];
             const uniqueShipmentIds = [...new Set(allTrackingData.shipmentIds)];
             if (uniqueLineItemIds.length > 0 && uniqueShipmentIds.length > 0) {
@@ -647,7 +734,10 @@ async function checkAndProcessImportData(io) {
             }
 
             const finalCounts = await getStatusCounts(importDataRowsCollection, importDataId);
-            const allRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId) }).toArray();
+            const allRows = await importDataRowsCollection.find(
+              { importDataId: new ObjectId(importDataId) },
+              { projection: { rowIndex: 1, status: 1, message: 1, error: 1, "data.POName": 1, "data.PONumber": 1, "data.SKU": 1, "data.shippingNumber": 1 } }
+            ).limit(500).toArray();
 
             await importDataCollection.updateOne(
               { _id: new ObjectId(importDataId) },
@@ -687,6 +777,21 @@ async function checkAndProcessBulkUpdateImportData(io) {
     const importDataCollection = database.collection("ImportData");
     const schemaCollection = database.collection("Schema");
     const importDataRowsCollection = database.collection("ImportDataRows");
+
+    const stuckBefore = new Date(Date.now() - STUCK_PROCESSING_MINUTES * 60 * 1000);
+    const recovered = await importDataRowsCollection.updateMany(
+      {
+        status: "processing",
+        processingStartedAt: { $lt: stuckBefore },
+      },
+      {
+        $set: { status: "pending" },
+        $unset: { processingStartedAt: "" },
+      }
+    );
+    if (recovered.modifiedCount > 0) {
+      console.log(`♻️ Recovered ${recovered.modifiedCount} stuck bulk-update rows`);
+    }
 
     const candidateRows = await importDataRowsCollection.find({ status: "pending" }).limit(100).toArray();
     if (candidateRows.length === 0) { console.log("⏰ No pending Bulk Update rows"); return; }
@@ -745,29 +850,44 @@ async function checkAndProcessBulkUpdateImportData(io) {
 
       const initialCounts = await getStatusCounts(importDataRowsCollection, importDataId);
       const totalRows = initialCounts.total;
+      const progressCounts = {
+        total: initialCounts.total,
+        success: initialCounts.success,
+        failure: initialCounts.failure,
+        pending: initialCounts.pending,
+        processing: initialCounts.processing,
+        pending_reconciliation: initialCounts.pending_reconciliation,
+      };
 
       for (const rowDoc of rows) {
         try {
           await processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, io, importDataId.toString(), fileName);
 
-          const counts = await getStatusCounts(importDataRowsCollection, importDataId);
           const latestRow = await importDataRowsCollection.findOne({ _id: rowDoc._id });
+          if (progressCounts.processing > 0) progressCounts.processing -= 1;
+          const latestStatus = latestRow?.status;
+          if (latestStatus && Object.prototype.hasOwnProperty.call(progressCounts, latestStatus)) {
+            progressCounts[latestStatus] += 1;
+          }
 
           io.emit("importDataProgress", {
             importDataId: importDataId.toString(), fileName,
-            processed: counts.success + counts.failure,
+            processed: progressCounts.success + progressCounts.failure,
             total: totalRows,
-            success: counts.success,
-            errors: counts.failure,
-            remaining: counts.pending + counts.processing,
+            success: progressCounts.success,
+            errors: progressCounts.failure,
+            remaining: progressCounts.pending + progressCounts.processing,
             rowId: rowDoc._id.toString(),
             status: latestRow?.status,
             error: latestRow?.error
           });
 
-          if (counts.pending === 0 && counts.processing === 0) {
+          if (progressCounts.pending === 0 && progressCounts.processing === 0) {
             const finalCounts = await getStatusCounts(importDataRowsCollection, importDataId);
-            const allRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId) }).toArray();
+            const allRows = await importDataRowsCollection.find(
+              { importDataId: new ObjectId(importDataId) },
+              { projection: { rowIndex: 1, status: 1, message: 1, error: 1 } }
+            ).limit(500).toArray();
 
             await importDataCollection.updateOne(
               { _id: new ObjectId(importDataId) },
@@ -808,6 +928,61 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
     if (allTrackedShipments.length === 0) { console.log("No tracked shipments for reconciliation"); return; }
 
     let reconciledCount = 0;
+    const touchedRowIds = new Set();
+    const pendingRows = await importDataRowsCollection.find({
+      importDataId: new ObjectId(importDataId),
+      status: "pending_reconciliation",
+    }).toArray();
+    const pendingRowsBySku = new Map();
+    for (const row of pendingRows) {
+      const rowSku = String(row?.data?.SKU || "").trim();
+      if (!rowSku) continue;
+      if (!pendingRowsBySku.has(rowSku)) pendingRowsBySku.set(rowSku, []);
+      pendingRowsBySku.get(rowSku).push(row);
+    }
+
+    const markRowsFailureBySkus = async (skus = [], message) => {
+      const uniqueSkus = [...new Set((Array.isArray(skus) ? skus : []).map((s) => String(s || "").trim()).filter(Boolean))];
+      for (const sku of uniqueSkus) {
+        const rows = pendingRowsBySku.get(sku) || [];
+        for (const row of rows) {
+          const rowId = String(row._id);
+          if (touchedRowIds.has(rowId)) continue;
+          await handleRowError(importDataRowsCollection, row, message, io, importDataId, fileName);
+          touchedRowIds.add(rowId);
+        }
+      }
+    };
+
+    const markRowsSuccessBySkus = async (skus = [], message) => {
+      const uniqueSkus = [...new Set((Array.isArray(skus) ? skus : []).map((s) => String(s || "").trim()).filter(Boolean))];
+      for (const sku of uniqueSkus) {
+        const rows = pendingRowsBySku.get(sku) || [];
+        for (const row of rows) {
+          const rowId = String(row._id);
+          if (touchedRowIds.has(rowId)) continue;
+          await importDataRowsCollection.updateOne(
+            { _id: row._id, status: "pending_reconciliation" },
+            { $set: { status: "success", message, processedAt: new Date() } }
+          );
+          io.emit("importDataProgress", { importDataId, fileName, rowId, status: "success", message });
+          touchedRowIds.add(rowId);
+        }
+      }
+    };
+
+    const normalizeQty = (v) => {
+      const n = Number.parseInt(v, 10);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const toIsoDate = (raw) => {
+      if (!raw) return null;
+      const d = raw instanceof Date ? raw : new Date(raw);
+      if (Number.isNaN(d.getTime())) return null;
+      return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0];
+    };
+
     const lineItems = await lineItemsCollection.find({
       _id: { $in: trackedLineItemIds.map(id => new ObjectId(id)) },
       shipments: { $exists: true, $ne: [] },
@@ -815,6 +990,12 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
     }).toArray();
 
     for (const lineItem of lineItems) {
+      if (isLineItemInvoiceLocked(lineItem)) {
+        const blockedSkus = (Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : []).map((s) => s?.csmSku).filter(Boolean);
+        await markRowsFailureBySkus(blockedSkus, "Line item is invoiced/delivered. Reconciliation is blocked.");
+        continue;
+      }
+
       const lineItemSizeBreakdown = Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : [];
       if (lineItemSizeBreakdown.length === 0) continue;
       const shipmentsArray = Array.isArray(lineItem.shipments) ? [...lineItem.shipments] : [];
@@ -827,26 +1008,21 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
         if (shipmentObj.invoiceId ||shipmentStatus === "Invoiced" || shipmentStatus === "Delivered") {
           const sizeNamesBlocked = shipmentSizeBreakdown.map(s => s.sizeName).filter(Boolean);
           const blockedSkus = lineItemSizeBreakdown.filter(s => sizeNamesBlocked.includes(s.sizeName)).map(s => s.csmSku).filter(Boolean);
-          if (blockedSkus.length > 0) {
-            const blockedRows = await importDataRowsCollection.find({
-              importDataId: new ObjectId(importDataId),
-              "data.SKU": { $in: blockedSkus },
-              status: "pending_reconciliation"
-            }).toArray();
-            for (const br of blockedRows) {
-              await handleRowError(
-                importDataRowsCollection,
-                br,
-                `Line Item shipment has invalid status (${shipmentStatus}). Cannot reconcile while Invoiced or Delivered.`,
-                io,
-                importDataId,
-                fileName
-              );
-            }
-          }
+          await markRowsFailureBySkus(
+            blockedSkus,
+            `Line Item shipment has invalid status (${shipmentStatus}). Cannot reconcile while Invoiced or Delivered.`
+          );
           continue;
         }
         if (shipmentSizeBreakdown.length === 0) continue;
+        if (shipmentSizeBreakdown.some((s) => !String(s?.sizeName || "").trim())) {
+          const relatedSkus = lineItemSizeBreakdown.map((s) => s?.csmSku).filter(Boolean);
+          await markRowsFailureBySkus(
+            relatedSkus,
+            "Invalid sizeBreakdown: sizeName is missing; reconciliation skipped."
+          );
+          continue;
+        }
 
         const tryMatchShipments = (shipmentsList) => {
           const matchingShipments = [];
@@ -859,13 +1035,20 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
               if (!size.sizeName) { allSizesMatch = false; break; }
               const lineItemSize = lineItemSizeBreakdown.find(ls => ls.sizeName === size.sizeName && ls.csmSku);
               if (!lineItemSize) { allSizesMatch = false; break; }
-              const idx = tempRemaining.findIndex(sp => sp.sizeName === size.sizeName && sp.sku === lineItemSize.csmSku && parseInt(sp.quantity || 0) === parseInt(size.quantity || 0));
+              const idx = tempRemaining.findIndex(
+                (sp) =>
+                  String(sp?.sizeName || "").trim() === String(size?.sizeName || "").trim() &&
+                  String(sp?.sku || "").trim() === String(lineItemSize?.csmSku || "").trim() &&
+                  normalizeQty(sp?.quantity) === normalizeQty(size?.quantity)
+              );
               if (idx === -1) { allSizesMatch = false; break; }
               tempMatched.push(tempRemaining[idx]);
               tempRemaining.splice(idx, 1);
             }
             if (allSizesMatch && tempMatched.length === shipmentSizeBreakdown.length) {
-              const modeMatches = !shipmentObj.shippingMode || (trackedShipment.shippingMode && trackedShipment.shippingMode.toLowerCase() === shipmentObj.shippingMode.toLowerCase());
+              const trackedMode = trackedShipment?.shippingMode ? formatShippingMode(trackedShipment.shippingMode) : null;
+              const slotMode = shipmentObj?.shippingMode ? formatShippingMode(shipmentObj.shippingMode) : null;
+              const modeMatches = !slotMode || !trackedMode || trackedMode.toLowerCase() === slotMode.toLowerCase();
               if (modeMatches) matchingShipments.push({ shipment: trackedShipment, matchedSuspectedProducts: tempMatched });
             }
           }
@@ -884,7 +1067,10 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
             const d = match.shipment.exfactoryDate || match.shipment.shipDate;
             if (d) {
               const dateObj = d instanceof Date ? d : new Date(d);
-              if (!earliestDate || dateObj < earliestDate) { earliestDate = dateObj; selectedMatch = match; }
+              if (!Number.isNaN(dateObj.getTime()) && (!earliestDate || dateObj < earliestDate)) {
+                earliestDate = dateObj;
+                selectedMatch = match;
+              }
             } else if (!selectedMatch) selectedMatch = match;
           }
           const chosen = selectedMatch || matchingShipments[0];
@@ -896,8 +1082,8 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
             ...shipmentObj,
             shipmentId: matchedShipment._id.toString(),
             shipmentName: matchedShipment.shippingNumber || matchedShipment.name || "",
-            shipdate: matchedShipment.shipDate ? new Date(Date.UTC(matchedShipment.shipDate.getUTCFullYear(), matchedShipment.shipDate.getUTCMonth(), matchedShipment.shipDate.getUTCDate(), 0, 0, 0, 0)).toISOString().split("T")[0] : null,
-            shippingMode: matchedShipment.shippingMode || shipmentObj.shippingMode || "Air",
+            shipdate: toIsoDate(matchedShipment.shipDate),
+            shippingMode: formatShippingMode(matchedShipment.shippingMode) || formatShippingMode(shipmentObj.shippingMode) || "Air",
             status: "Shipped"
           };
 
@@ -912,7 +1098,11 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
           if (updateRes?.success) {
             reconciledCount++;
             const updatedSuspectedProducts = (Array.isArray(matchedShipment.suspectedProducts) ? matchedShipment.suspectedProducts : []).filter(sp =>
-              !matchedSuspectedProducts.some(msp => msp.sizeName === sp.sizeName && msp.sku === sp.sku && parseInt(msp.quantity || 0) === parseInt(sp.quantity || 0))
+              !matchedSuspectedProducts.some(msp =>
+                String(msp?.sizeName || "").trim() === String(sp?.sizeName || "").trim()
+                && String(msp?.sku || "").trim() === String(sp?.sku || "").trim()
+                && normalizeQty(msp?.quantity) === normalizeQty(sp?.quantity)
+              )
             );
             await updateEntity("Shipment", matchedShipment._id, { suspectedProducts: updatedSuspectedProducts });
 
@@ -927,14 +1117,10 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
 
             const relatedCsmSkus = matchedSuspectedProducts.map(msp => msp.sku).filter(Boolean);
             if (relatedCsmSkus.length > 0) {
-              const successRows = await importDataRowsCollection.updateMany(
-                { importDataId: new ObjectId(importDataId), "data.SKU": { $in: relatedCsmSkus }, status: "pending_reconciliation" },
-                { $set: { status: "success", message: `Successfully reconciled and associated with shipment ${matchedShipment.shippingNumber || matchedShipment._id.toString()}`, processedAt: new Date() } }
+              await markRowsSuccessBySkus(
+                relatedCsmSkus,
+                `Successfully reconciled and associated with shipment ${matchedShipment.shippingNumber || matchedShipment._id.toString()}`
               );
-              if (successRows.modifiedCount > 0) {
-                const updatedRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId), "data.SKU": { $in: relatedCsmSkus }, status: "success" }).toArray();
-                for (const row of updatedRows) io.emit("importDataProgress", { importDataId, fileName, rowId: row._id.toString(), status: "success", message: row.message });
-              }
             }
           }
         } else {
@@ -943,23 +1129,31 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
           const relatedCsmSkus = lineItemSizeBreakdown.filter(s => sizeNames.includes(s.sizeName)).map(s => s.csmSku).filter(Boolean);
 
           if (relatedCsmSkus.length > 0) {
-            const errorRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId), "data.SKU": { $in: relatedCsmSkus }, status: "pending_reconciliation" }).toArray();
-            for (const errorRow of errorRows) {
-              const existing = await importDataRowsCollection.findOne({ _id: errorRow._id });
-              if (existing?.message?.includes("Successfully reconciled") || existing?.message?.includes("added to suspectedProducts")) continue;
-              await handleRowError(importDataRowsCollection, errorRow, `No Suspected Products Found: no matching suspectedProducts found for sizes ${sizeQuantities}`, io, importDataId, fileName);
-            }
+            await markRowsFailureBySkus(
+              relatedCsmSkus,
+              `No Suspected Products Found: no matching suspectedProducts found for sizes ${sizeQuantities}`
+            );
           }
         }
       }
     }
 
-    const remainingPendingRows = await importDataRowsCollection.find({ importDataId: new ObjectId(importDataId), status: "pending_reconciliation" }).toArray();
+    const remainingPendingRows = await importDataRowsCollection.find({
+      importDataId: new ObjectId(importDataId),
+      status: "pending_reconciliation",
+    }).toArray();
     for (const pendingRow of remainingPendingRows) {
-      const existing = await importDataRowsCollection.findOne({ _id: pendingRow._id });
-      if (existing?.status === "pending_reconciliation" && existing?.message?.includes("added to suspectedProducts")) {
-        await handleRowError(importDataRowsCollection, pendingRow, "No suspectedProducts found: After reconciliation process completed, no matching suspectedProducts found.", io, importDataId, fileName);
-      }
+      const rowId = String(pendingRow._id);
+      if (touchedRowIds.has(rowId)) continue;
+      await handleRowError(
+        importDataRowsCollection,
+        pendingRow,
+        "No suspectedProducts found: After reconciliation process completed, no matching suspectedProducts found.",
+        io,
+        importDataId,
+        fileName
+      );
+      touchedRowIds.add(rowId);
     }
 
     console.log(`✅ Reconciliation completed: ${reconciledCount} sizePricing line items associated`);
