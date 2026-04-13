@@ -54,6 +54,42 @@ function parseImportQuantity(rawValue) {
   return { value: parsed, valid: true };
 }
 
+function normalizeImportSku(raw) {
+  if (raw == null) return "";
+  return String(raw).trim();
+}
+
+function sizeRowSkuValues(size) {
+  if (!size || typeof size !== "object") return [];
+  const vals = [
+    size.csmSku,
+  ];
+  return [...new Set(vals.map((v) => normalizeImportSku(v)).filter(Boolean))];
+}
+
+function sizeRowMatchesImportSku(size, importSkuNorm) {
+  const norm = normalizeImportSku(importSkuNorm);
+  if (!norm) return false;
+  return sizeRowSkuValues(size).some((v) => v === norm);
+}
+
+function canonicalSizeSkuForShipment(size) {
+  if (!size || typeof size !== "object") return "";
+  const csm =
+    normalizeImportSku(size.csmSku) ||
+    normalizeImportSku(size.CsmSku) ||
+    normalizeImportSku(size.CSM_SKU);
+  if (csm) return csm;
+  const sku = normalizeImportSku(size.sku) || normalizeImportSku(size.Sku) || normalizeImportSku(size.SKU);
+  if (sku) return sku;
+  return (
+    normalizeImportSku(size.clientSku) ||
+    normalizeImportSku(size.ClientSku) ||
+    normalizeImportSku(size.client_sku) ||
+    ""
+  );
+}
+
 function summarizeLineItemShipmentsForLog(shipments = []) {
   return (Array.isArray(shipments) ? shipments : []).map((s) => ({
     id: s?.id,
@@ -156,6 +192,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
   try {
     const poName = getMappedValue(item, "POName", columnMapping) || getMappedValue(item, "PONumber", columnMapping);
     const sku = getMappedValue(item, "SKU", columnMapping);
+    const skuNorm = normalizeImportSku(sku);
     const shippingNumber = getMappedValue(item, "shippingNumber", columnMapping);
     const shipDateValue = getMappedValue(item, "shipDate", columnMapping);
     const quantityRaw = getMappedValue(item, "quantity", columnMapping);
@@ -209,37 +246,55 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       lineItem = lineItemsData.data[0];
       isSizePricingCase = false;
     } else {
-      const lineItemsData = await getAggregatedData({
-        entityType: "lineItem",
-        filter: { poId: { $eq: new ObjectId(po._id) }, "sizeBreakdown.csmSku": sku },
-        pagination: { page: 1, pageSize: 1000 }
+      const poOid = new ObjectId(String(po._id));
+      const lineItemsCollection = database.collection("lineItem");
+      const poLineItems = await lineItemsCollection.find({ poId: poOid }).limit(2000).toArray();
+      const allMatchingLineItems = poLineItems.filter((li) => {
+        const sizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
+        return sizeBreakdown.some((row) => sizeRowMatchesImportSku(row, skuNorm));
       });
-      if (!lineItemsData?.data?.length) {
-        await handleRowError(importDataRowsCollection, rowDoc, `No line item found with matching csmSku ${sku} in sizeBreakdown`, io, importDataId, fileName);
+      if (allMatchingLineItems.length === 0) {
+        await handleRowError(
+          importDataRowsCollection,
+          rowDoc,
+          `No line item on PO ${poName} with size SKU "${sku}" (checked sizeBreakdown.csmSku / sku / clientSku)`,
+          io,
+          importDataId,
+          fileName
+        );
         return;
       }
-      const allMatchingLineItems = lineItemsData.data;
-      let foundLineItem = null, foundMatchingSize = null;
+      let foundLineItem = null;
       for (const li of allMatchingLineItems) {
         const sizeBreakdown = Array.isArray(li.sizeBreakdown) ? li.sizeBreakdown : [];
-        const matchingSize = sizeBreakdown.find(size => size.csmSku && size.csmSku === sku);
-        if (matchingSize) {
-          if (quantity !== null) {
-            if (parseInt(matchingSize.quantity || 0) === parseInt(quantity)) { foundLineItem = li; foundMatchingSize = matchingSize; break; }
-          } else {
-            if (!foundLineItem) { foundLineItem = li; foundMatchingSize = matchingSize; }
+        const matchingSize = sizeBreakdown.find((row) => sizeRowMatchesImportSku(row, skuNorm));
+        if (!matchingSize) continue;
+        if (quantity !== null) {
+          if (parseInt(matchingSize.quantity || 0, 10) === parseInt(quantity, 10)) {
+            foundLineItem = li;
+            break;
           }
+        } else if (!foundLineItem) {
+          foundLineItem = li;
         }
       }
       if (!foundLineItem && quantity === null && allMatchingLineItems.length > 0) {
         const firstLi = allMatchingLineItems[0];
-        const matchingSize = (Array.isArray(firstLi.sizeBreakdown) ? firstLi.sizeBreakdown : []).find(s => s.csmSku && s.csmSku === sku);
-        if (matchingSize) { foundLineItem = firstLi; foundMatchingSize = matchingSize; }
+        const sizeBreakdown = Array.isArray(firstLi.sizeBreakdown) ? firstLi.sizeBreakdown : [];
+        const matchingSize = sizeBreakdown.find((row) => sizeRowMatchesImportSku(row, skuNorm));
+        if (matchingSize) foundLineItem = firstLi;
       }
       if (!foundLineItem) {
         const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
         if (existingRowCheck?.status !== "pending" && existingRowCheck?.status !== "success") {
-          await handleRowError(importDataRowsCollection, rowDoc, `Product not found: ${sku} and no matching size found in line items`, io, importDataId, fileName);
+          await handleRowError(
+            importDataRowsCollection,
+            rowDoc,
+            `Line items on PO ${poName} list size SKU "${sku}" but none match import quantity`,
+            io,
+            importDataId,
+            fileName
+          );
         }
         return;
       }
@@ -328,7 +383,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
       if (isSizePricingCase) {
         trackingData.sizePricingLineItemIds.push(li._id.toString());
-        const matchingSizes = lineItemSizeBreakdown.filter(size => size.csmSku && size.csmSku === sku);
+        const matchingSizes = lineItemSizeBreakdown.filter((size) => sizeRowMatchesImportSku(size, skuNorm));
         if (matchingSizes.length === 0) continue;
         if (matchingSizes.length > 1) {
           const sizeNames = matchingSizes.map(s => s.sizeName).filter(Boolean).join(", ");
@@ -346,14 +401,24 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           }
         }
 
-        let matchingSize = matchingSizes.find(size => !currentSuspectedProducts.some(sp => sp.sku === size.csmSku && sp.sizeName === size.sizeName));
+        const sizeMatchesSuspected = (size, sp) =>
+          normalizeImportSku(sp.sku) === canonicalSizeSkuForShipment(size) &&
+          String(sp.sizeName || "").trim() === String(size.sizeName || "").trim();
+
+        let matchingSize = matchingSizes.find((size) => !currentSuspectedProducts.some((sp) => sizeMatchesSuspected(size, sp)));
         if (!matchingSize) matchingSize = matchingSizes[0];
         const finalQuantity = quantity !== null ? parseInt(quantity, 10) : parseInt(matchingSize.quantity || 0, 10) || 0;
+        const sizeSkuForShipment = canonicalSizeSkuForShipment(matchingSize) || skuNorm;
 
         if (dbShipmentId && shipmentEntity) {
           const suspectedProducts = Array.isArray(shipmentEntity.suspectedProducts) ? [...shipmentEntity.suspectedProducts] : [];
-          const existingIdx = suspectedProducts.findIndex(sp => sp.sku === matchingSize.csmSku && sp.sizeName === matchingSize.sizeName && parseInt(sp.quantity || 0) === finalQuantity);
-          const suspectedProductData = { sizeName: matchingSize.sizeName, sku: matchingSize.csmSku, quantity: finalQuantity };
+          const existingIdx = suspectedProducts.findIndex(
+            (sp) =>
+              normalizeImportSku(sp.sku) === sizeSkuForShipment &&
+              String(sp.sizeName || "").trim() === String(matchingSize.sizeName || "").trim() &&
+              parseInt(sp.quantity || 0, 10) === finalQuantity
+          );
+          const suspectedProductData = { sizeName: matchingSize.sizeName, sku: sizeSkuForShipment, quantity: finalQuantity };
           if (existingIdx >= 0) suspectedProducts[existingIdx] = suspectedProductData;
           else suspectedProducts.push(suspectedProductData);
           const updateRes = await updateEntity("Shipment", dbShipmentId, { suspectedProducts });
@@ -991,7 +1056,9 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
 
     for (const lineItem of lineItems) {
       if (isLineItemInvoiceLocked(lineItem)) {
-        const blockedSkus = (Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : []).map((s) => s?.csmSku).filter(Boolean);
+        const blockedSkus = (Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : [])
+          .map((s) => canonicalSizeSkuForShipment(s))
+          .filter(Boolean);
         await markRowsFailureBySkus(blockedSkus, "Line item is invoiced/delivered. Reconciliation is blocked.");
         continue;
       }
@@ -1007,7 +1074,10 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
         const shipmentStatus = shipmentObj.status || "";
         if (shipmentObj.invoiceId ||shipmentStatus === "Invoiced" || shipmentStatus === "Delivered") {
           const sizeNamesBlocked = shipmentSizeBreakdown.map(s => s.sizeName).filter(Boolean);
-          const blockedSkus = lineItemSizeBreakdown.filter(s => sizeNamesBlocked.includes(s.sizeName)).map(s => s.csmSku).filter(Boolean);
+          const blockedSkus = lineItemSizeBreakdown
+            .filter(s => sizeNamesBlocked.includes(s.sizeName))
+            .map(s => canonicalSizeSkuForShipment(s))
+            .filter(Boolean);
           await markRowsFailureBySkus(
             blockedSkus,
             `Line Item shipment has invalid status (${shipmentStatus}). Cannot reconcile while Invoiced or Delivered.`
@@ -1016,7 +1086,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
         }
         if (shipmentSizeBreakdown.length === 0) continue;
         if (shipmentSizeBreakdown.some((s) => !String(s?.sizeName || "").trim())) {
-          const relatedSkus = lineItemSizeBreakdown.map((s) => s?.csmSku).filter(Boolean);
+          const relatedSkus = lineItemSizeBreakdown.map((s) => canonicalSizeSkuForShipment(s)).filter(Boolean);
           await markRowsFailureBySkus(
             relatedSkus,
             "Invalid sizeBreakdown: sizeName is missing; reconciliation skipped."
@@ -1033,12 +1103,17 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
             const tempMatched = [], tempRemaining = [...trackedSuspected];
             for (const size of shipmentSizeBreakdown) {
               if (!size.sizeName) { allSizesMatch = false; break; }
-              const lineItemSize = lineItemSizeBreakdown.find(ls => ls.sizeName === size.sizeName && ls.csmSku);
+              const lineItemSize = lineItemSizeBreakdown.find(
+                (ls) =>
+                  String(ls?.sizeName || "").trim() === String(size?.sizeName || "").trim() &&
+                  canonicalSizeSkuForShipment(ls) !== ""
+              );
               if (!lineItemSize) { allSizesMatch = false; break; }
+              const lineSku = canonicalSizeSkuForShipment(lineItemSize);
               const idx = tempRemaining.findIndex(
                 (sp) =>
                   String(sp?.sizeName || "").trim() === String(size?.sizeName || "").trim() &&
-                  String(sp?.sku || "").trim() === String(lineItemSize?.csmSku || "").trim() &&
+                  normalizeImportSku(sp?.sku) === lineSku &&
                   normalizeQty(sp?.quantity) === normalizeQty(size?.quantity)
               );
               if (idx === -1) { allSizesMatch = false; break; }
@@ -1126,7 +1201,10 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
         } else {
           const sizeNames = shipmentSizeBreakdown.map(s => s.sizeName).filter(Boolean);
           const sizeQuantities = shipmentSizeBreakdown.map(s => `${s.sizeName}(${s.quantity || 0})`).join(", ");
-          const relatedCsmSkus = lineItemSizeBreakdown.filter(s => sizeNames.includes(s.sizeName)).map(s => s.csmSku).filter(Boolean);
+          const relatedCsmSkus = lineItemSizeBreakdown
+            .filter(s => sizeNames.includes(s.sizeName))
+            .map(s => canonicalSizeSkuForShipment(s))
+            .filter(Boolean);
 
           if (relatedCsmSkus.length > 0) {
             await markRowsFailureBySkus(
