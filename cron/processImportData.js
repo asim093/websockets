@@ -90,6 +90,23 @@ function canonicalSizeSkuForShipment(size) {
   );
 }
 
+function lineItemShipmentSlotMatchesSizeQty(lineItem, sizeName, importQty) {
+  const q = parseInt(importQty, 10);
+  if (!Number.isFinite(q)) return false;
+  const nameNorm = String(sizeName || "").trim();
+  if (!nameNorm) return false;
+  const shipments = Array.isArray(lineItem?.shipments) ? lineItem.shipments : [];
+  for (const sh of shipments) {
+    const sb = Array.isArray(sh.sizeBreakdown) ? sh.sizeBreakdown : [];
+    for (const row of sb) {
+      if (String(row?.sizeName || "").trim() === nameNorm && parseInt(row?.quantity || 0, 10) === q) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function summarizeLineItemShipmentsForLog(shipments = []) {
   return (Array.isArray(shipments) ? shipments : []).map((s) => ({
     id: s?.id,
@@ -270,7 +287,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         const matchingSize = sizeBreakdown.find((row) => sizeRowMatchesImportSku(row, skuNorm));
         if (!matchingSize) continue;
         if (quantity !== null) {
-          if (parseInt(matchingSize.quantity || 0, 10) === parseInt(quantity, 10)) {
+          if (lineItemShipmentSlotMatchesSizeQty(li, matchingSize.sizeName, quantity)) {
             foundLineItem = li;
             break;
           }
@@ -287,10 +304,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       if (!foundLineItem) {
         const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
         if (existingRowCheck?.status !== "pending" && existingRowCheck?.status !== "success") {
+          const qtyHint = quantity != null ? String(quantity) : "N/A";
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            `Line items on PO ${poName} list size SKU "${sku}" but none match import quantity`,
+            `PO ${poName}: size SKU "${sku}" found on line item but no shipments[].sizeBreakdown row matches that size with quantity ${qtyHint} (line sizeBreakdown totals are not used)`,
             io,
             importDataId,
             fileName
