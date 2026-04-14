@@ -317,7 +317,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         await handleRowError(
           importDataRowsCollection,
           rowDoc,
-          `No line item on PO ${poName} with size SKU "${sku}" (checked sizeBreakdown.csmSku).`,
+          `On PO ${poName}, no product line Includes this size SKU "${sku}". Check that the SKU matches a size on that order.`,
           io,
           importDataId,
           fileName
@@ -347,11 +347,11 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       if (!foundLineItem) {
         const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
         if (existingRowCheck?.status !== "pending" && existingRowCheck?.status !== "success") {
-          const qtyHint = quantity != null ? String(quantity) : "N/A";
+          const qtyHint = quantity != null ? String(quantity) : "not given";
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            `PO ${poName}: size SKU "${sku}" found on line item but no shipments[].sizeBreakdown row matches that size with quantity ${qtyHint} (line sizeBreakdown totals are not used)`,
+            `On PO ${poName}, SKU "${sku}" is on the order, but no shipment line for that product lists this size with quantity ${qtyHint}. On each shipment row, the size and quantity must match what you put in the import file.`,
             io,
             importDataId,
             fileName
@@ -367,7 +367,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       await handleRowError(
         importDataRowsCollection,
         rowDoc,
-        "Line item is invoiced/delivered. No changes are allowed.",
+        "This order line is already invoiced or delivered. It cannot be changed.",
         io,
         importDataId,
         fileName
@@ -429,7 +429,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         await handleRowError(
           importDataRowsCollection,
           rowDoc,
-          "Line item is invoiced/delivered. No changes are allowed.",
+          "This Order Line is already invoiced or delivered. It cannot be changed.",
           io,
           importDataId,
           fileName
@@ -447,7 +447,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            `No size row on this line item matches import SKU ${sku}.`,
+            `This product line does not include SKU "${sku}".`,
             io,
             importDataId,
             fileName
@@ -456,7 +456,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         }
         if (matchingSizes.length > 1) {
           const sizeNames = matchingSizes.map(s => s.sizeName).filter(Boolean).join(", ");
-          await handleRowError(importDataRowsCollection, rowDoc, `Multiple sizes found with same SKU ${sku} in sizeBreakdown: ${sizeNames}. Please specify size or quantity to match.`, io, importDataId, fileName);
+          await handleRowError(importDataRowsCollection, rowDoc, `More than one size on this line uses SKU "${sku}" (${sizeNames}). Enter quantity in your file so we can pick the correct shipment line.`, io, importDataId, fileName);
           return { trackingData };
         }
 
@@ -467,8 +467,8 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
 
         if (slotIndex < 0) {
           const noSlotMsg = quantity !== null
-            ? "The import quantity does not match any shipment slot for this size on the line item. Other fields may align, but the shipment breakdown must include this size with the same quantity."
-            : "No shipment slot on the line item includes this size in its size breakdown.";
+            ? `For this size, quantity ${quantity} does not match any shipment line on the product. Each shipment line must show this size with the same quantity as in your file.`
+            : "No shipment line on this product lists this size. Add the size to a shipment row on the order first.";
           await handleRowError(importDataRowsCollection, rowDoc, noSlotMsg, io, importDataId, fileName);
           return { trackingData };
         }
@@ -479,7 +479,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            `Line item shipment has invalid status (${shipmentStatus}). Cannot update while Invoiced or Delivered.`,
+            `This shipment line is already invoiced or delivered (${shipmentStatus}). It cannot be updated.`,
             io,
             importDataId,
             fileName
@@ -491,7 +491,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            "The shipping mode on this import does not match the line-item shipment slot for this size and quantity. The quantity matches a slot, but the mode must match when both values are set.",
+            "The shipping mode in your file does not match the shipping mode on the shipment line for this size and quantity. .",
             io,
             importDataId,
             fileName
@@ -503,7 +503,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            "Shipment record could not be created or resolved for this shipping number; the line item was not updated.",
+            "We could not create or find the shipment for this shipping number, so the order line was not updated.",
             io,
             importDataId,
             fileName
@@ -528,7 +528,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           const shipment = shipmentsArray[i];
           const shipmentStatus = shipment.status || "";
           if (shipment.invoiceId || shipmentStatus === "Invoiced" || shipmentStatus === "Delivered") {
-            await handleRowError(importDataRowsCollection, rowDoc, `Line Item has invalid status (${shipmentStatus}). Cannot update line items with status Invoiced or Delivered.`, io, importDataId, fileName);
+            await handleRowError(importDataRowsCollection, rowDoc, `This shipment line is already invoiced or delivered (${shipmentStatus}). It cannot be updated.`, io, importDataId, fileName);
             return;
           }
           if (!shipment.sizeBreakdown || (Array.isArray(shipment.sizeBreakdown) && shipment.sizeBreakdown.length === 0)) {
@@ -558,7 +558,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             await handleRowError(
               importDataRowsCollection,
               rowDoc,
-              "Shipment could not be resolved for this shipping number; the line item was not updated.",
+              "We could not find the shipment for this shipping number, so the order line was not updated.",
               io,
               importDataId,
               fileName
@@ -569,7 +569,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             await handleRowError(
               importDataRowsCollection,
               rowDoc,
-              "The shipping mode on this import does not match the line-item shipment slot for this quantity. The quantity matches an open slot, but both sides specify a mode and they differ.",
+              "The shipping mode in your file does not match the shipment line for this quantity. The quantity is right, but both sides list a mode and they do not match.",
               io,
               importDataId,
               fileName
@@ -580,7 +580,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
             await handleRowError(
               importDataRowsCollection,
               rowDoc,
-              "The import quantity does not match any line-item shipment slot for this product. Other fields may align, but there is no open shipment row with this exact quantity.",
+              "No open shipment line on this product has exactly this quantity with a matching shipping mode. Check each shipment row on the order.",
               io,
               importDataId,
               fileName
@@ -590,7 +590,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            "No line-item shipment slot was found with this quantity (only slots without a size breakdown are used for this product SKU).",
+            "For this product, the import only updates shipment lines that use a single total quantity (not a size-by-size list on the row). None of those lines matched your quantity.",
             io,
             importDataId,
             fileName
@@ -626,8 +626,8 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
       const existingRowCheck = await importDataRowsCollection.findOne({ _id: rowDoc._id });
       if (existingRowCheck?.status === "pending_reconciliation" || existingRowCheck?.status === "pending" || existingRowCheck?.status === "success") return { trackingData };
       const errorMessage = errorReason || (lineItem?.sizeBreakdown?.length > 0
-        ? `No shipment slot could be updated for SKU ${sku}. Check quantity and shipping mode on each open shipment row.`
-        : `No shipment slot could be updated for quantity ${quantity !== null ? quantity : "N/A"} and shipping mode ${effectiveShippingMode || "N/A"}.`);
+        ? `We could not update a shipment line for SKU "${sku}". Check quantity and shipping mode on each open shipment on the order.`
+        : `We could not update a shipment line for quantity ${quantity !== null ? quantity : "N/A"} and shipping mode ${effectiveShippingMode || "N/A"}.`);
       await handleRowError(importDataRowsCollection, rowDoc, errorMessage, io, importDataId, fileName);
     }
 
@@ -1162,7 +1162,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
         const blockedSkus = (Array.isArray(lineItem.sizeBreakdown) ? lineItem.sizeBreakdown : [])
           .map((s) => canonicalSizeSkuForShipment(s))
           .filter(Boolean);
-        await markRowsFailureBySkus(blockedSkus, "Line item is invoiced/delivered. Reconciliation is blocked.");
+        await markRowsFailureBySkus(blockedSkus, "This order line is already invoiced or delivered, so it cannot be matched automatically.");
         continue;
       }
 
@@ -1192,7 +1192,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
           const relatedSkus = lineItemSizeBreakdown.map((s) => canonicalSizeSkuForShipment(s)).filter(Boolean);
           await markRowsFailureBySkus(
             relatedSkus,
-            "Invalid sizeBreakdown: sizeName is missing; reconciliation skipped."
+            "Some size names are missing on a shipment line, so automatic matching was skipped."
           );
           continue;
         }
@@ -1312,7 +1312,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
           if (relatedCsmSkus.length > 0) {
             await markRowsFailureBySkus(
               relatedCsmSkus,
-              `No Suspected Products Found: no matching suspectedProducts found for sizes ${sizeQuantities}`
+              `No shipment on file matched this order for sizes: ${sizeQuantities}. Check the shipment and the items flagged for review.`
             );
           }
         }
@@ -1329,7 +1329,7 @@ async function reconcileSizePricingLineItems(database, io, importDataId, fileNam
       await handleRowError(
         importDataRowsCollection,
         pendingRow,
-        "No suspectedProducts found: After reconciliation process completed, no matching suspectedProducts found.",
+        "After automatic review, no shipment could be linked to this row. Please check the order and shipment details manually.",
         io,
         importDataId,
         fileName
