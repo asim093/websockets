@@ -7,6 +7,7 @@ const { callMakeWebhook } = require("../utils/webhook");
 const { getMappedValue } = require("../utils/columnMapping");
 const { validateRequiredField, handleRowError } = require("../utils/importErrorhandling");
 
+// Normalizes shipping mode values into canonical labels.
 function formatShippingMode(mode) {
   if (!mode) return null;
   const modeUpper = mode.toUpperCase();
@@ -16,6 +17,7 @@ function formatShippingMode(mode) {
   return mode;
 }
 
+// Checks shipping mode compatibility for normal-pricing shipment slots.
 function normalPricingShippingModesCompatible(importModeFormatted, slotModeRaw) {
   const slotFmt = slotModeRaw != null && String(slotModeRaw).trim() !== "" ? formatShippingMode(slotModeRaw) : null;
   const imp = importModeFormatted || null;
@@ -24,6 +26,7 @@ function normalPricingShippingModesCompatible(importModeFormatted, slotModeRaw) 
   return true;
 }
 
+// Returns true when import mode conflicts with an existing shipment slot mode.
 function importModeConflictsWithSlot(importModeFormatted, slotShippingMode) {
   const imp = importModeFormatted != null && String(importModeFormatted).trim() !== ""
     ? formatShippingMode(importModeFormatted)
@@ -35,6 +38,7 @@ function importModeConflictsWithSlot(importModeFormatted, slotShippingMode) {
   return imp.toLowerCase() !== slot.toLowerCase();
 }
 
+// Forces associated shipment entries to "Shipped" when linked shipment info exists.
 function forceShippedStatusForAssociatedShipments(shipments = []) {
   return shipments.map((s) => {
     const hasShipmentId = s?.shipmentId != null && String(s.shipmentId).trim() !== "";
@@ -44,6 +48,7 @@ function forceShippedStatusForAssociatedShipments(shipments = []) {
   });
 }
 
+// Detects whether a line item is locked due to invoice or delivered state.
 function isLineItemInvoiceLocked(lineItem = {}) {
   const hasTopLevelInvoiceId = lineItem?.invoiceId != null && String(lineItem.invoiceId).trim() !== "";
   const hasInvoicesArray = Array.isArray(lineItem?.Invoices) && lineItem.Invoices.length > 0;
@@ -56,6 +61,7 @@ function isLineItemInvoiceLocked(lineItem = {}) {
   return hasTopLevelInvoiceId || hasInvoicesArray || hasLockedShipment;
 }
 
+// Parses import quantity and validates numeric input.
 function parseImportQuantity(rawValue) {
   if (rawValue == null) return { value: null, valid: false };
   const txt = String(rawValue).trim();
@@ -65,11 +71,13 @@ function parseImportQuantity(rawValue) {
   return { value: parsed, valid: true };
 }
 
+// Trims and normalizes imported SKU values to a comparable string.
 function normalizeImportSku(raw) {
   if (raw == null) return "";
   return String(raw).trim();
 }
 
+// Collects comparable SKU values from a size row.
 function sizeRowSkuValues(size) {
   if (!size || typeof size !== "object") return [];
   const vals = [
@@ -78,12 +86,14 @@ function sizeRowSkuValues(size) {
   return [...new Set(vals.map((v) => normalizeImportSku(v)).filter(Boolean))];
 }
 
+// Compares a size row against an imported SKU.
 function sizeRowMatchesImportSku(size, importSkuNorm) {
   const norm = normalizeImportSku(importSkuNorm);
   if (!norm) return false;
   return sizeRowSkuValues(size).some((v) => v === norm);
 }
 
+// Resolves the canonical SKU used for shipment reconciliation from a size row.
 function canonicalSizeSkuForShipment(size) {
   if (!size || typeof size !== "object") return "";
   const csm =
@@ -101,6 +111,7 @@ function canonicalSizeSkuForShipment(size) {
   );
 }
 
+// Finds whether any shipment slot matches a specific size name and quantity.
 function lineItemShipmentSlotMatchesSizeQty(lineItem, sizeName, importQty) {
   const q = parseInt(importQty, 10);
   if (!Number.isFinite(q)) return false;
@@ -118,6 +129,7 @@ function lineItemShipmentSlotMatchesSizeQty(lineItem, sizeName, importQty) {
   return false;
 }
 
+// Returns the first shipment slot index matching size name and quantity.
 function findFirstShipmentSlotIndexForSizeAndQty(lineItem, sizeName, importQty) {
   const q = parseInt(importQty, 10);
   if (!Number.isFinite(q)) return -1;
@@ -135,6 +147,7 @@ function findFirstShipmentSlotIndexForSizeAndQty(lineItem, sizeName, importQty) 
   return -1;
 }
 
+// Returns the first shipment slot index matching size name only.
 function findFirstShipmentSlotIndexForSizeName(lineItem, sizeName) {
   const nameNorm = String(sizeName || "").trim();
   if (!nameNorm) return -1;
@@ -150,6 +163,7 @@ function findFirstShipmentSlotIndexForSizeName(lineItem, sizeName) {
   return -1;
 }
 
+// Builds a lightweight shipment summary for import logging.
 function summarizeLineItemShipmentsForLog(shipments = []) {
   return (Array.isArray(shipments) ? shipments : []).map((s) => ({
     id: s?.id,
@@ -162,6 +176,7 @@ function summarizeLineItemShipmentsForLog(shipments = []) {
   }));
 }
 
+// Removes stale normal-pricing suspected products from a shipment.
 async function removeNormalPricingSuspectedProduct(database, shipmentId, sku) {
   try {
     if (!shipmentId || !sku) return;
@@ -182,6 +197,7 @@ async function removeNormalPricingSuspectedProduct(database, shipmentId, sku) {
   }
 }
 
+// Parses multiple date formats and returns a normalized UTC date.
 function parseDateString(dateString) {
   if (!dateString) return null;
   try {
@@ -230,6 +246,7 @@ function parseDateString(dateString) {
   }
 }
 
+// Aggregates ImportDataRows status counts for progress reporting.
 async function getStatusCounts(importDataRowsCollection, importDataId) {
   const result = await importDataRowsCollection.aggregate([
     { $match: { importDataId: new ObjectId(importDataId) } },
@@ -244,6 +261,7 @@ async function getStatusCounts(importDataRowsCollection, importDataId) {
   return counts;
 }
 
+// Processes one shipment import row and updates matching shipment/line item data.
 async function processImportDataRow(rowDoc, columnMapping, dbClient, database, io, importDataId, fileName) {
   const importDataRowsCollection = database.collection("ImportDataRows");
   const item = rowDoc.data;
@@ -642,6 +660,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
   }
 }
 
+// Processes one Bulk Update import row against the configured schema mapping.
 async function processBulkUpdateRow(rowDoc, importDataDoc, schemaDoc, database, io, importDataId, fileName) {
   const importDataRowsCollection = database.collection("ImportDataRows");
   const item = rowDoc.data || {};
@@ -785,6 +804,7 @@ let isProcessingShipment = false;
 let isProcessingBulkUpdate = false;
 const STUCK_PROCESSING_MINUTES = Number.parseInt(process.env.IMPORT_STUCK_PROCESSING_MINUTES || "15", 10);
 
+// Claims and processes pending shipment import rows in safe batches.
 async function checkAndProcessImportData(io) {
   if (isProcessingShipment) { console.log("⏸️ ImportData processing already in progress, skipping"); return; }
   isProcessingShipment = true;
@@ -934,6 +954,7 @@ async function checkAndProcessImportData(io) {
   }
 }
 
+// Claims and processes pending Bulk Update rows in safe batches.
 async function checkAndProcessBulkUpdateImportData(io) {
   if (isProcessingBulkUpdate) { console.log("⏸️ Bulk Update processing already in progress, skipping"); return; }
   isProcessingBulkUpdate = true;
@@ -1084,6 +1105,7 @@ async function checkAndProcessBulkUpdateImportData(io) {
   }
 }
 
+// Reconciles size-pricing line items with tracked shipments after import processing.
 async function reconcileSizePricingLineItems(database, io, importDataId, fileName, trackedLineItemIds = [], trackedShipmentIds = []) {
   try {
     if (trackedLineItemIds.length === 0 || trackedShipmentIds.length === 0) { console.log("No tracked items for reconciliation"); return; }
