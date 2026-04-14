@@ -317,7 +317,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
         await handleRowError(
           importDataRowsCollection,
           rowDoc,
-          `On PO ${poName}, no product line Includes this size SKU "${sku}". Check that the SKU matches a size on that order.`,
+          `On ${poName}, no product line Includes this size SKU "${sku}". Check that the SKU matches a size on that order.`,
           io,
           importDataId,
           fileName
@@ -351,7 +351,7 @@ async function processImportDataRow(rowDoc, columnMapping, dbClient, database, i
           await handleRowError(
             importDataRowsCollection,
             rowDoc,
-            `On PO ${poName}, SKU "${sku}" is on the order, but no shipment line for that product lists this size with quantity ${qtyHint}. On each shipment row, the size and quantity must match what you put in the import file.`,
+            `On ${poName}, SKU "${sku}" is on the order, but no shipment line for that product lists this size with quantity ${qtyHint}. On each shipment row, the size and quantity must match what you put in the import file.`,
             io,
             importDataId,
             fileName
